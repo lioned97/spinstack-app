@@ -153,12 +153,25 @@ export default function SpinStack() {
     return true;
   };
 
+  // OpenAlex ships abstracts as an inverted index ({word: [positions]}) — rebuild the text.
+  const reconstructAbstract = (inverted) => {
+    try {
+      const words = [];
+      Object.entries(inverted).forEach(([word, positions]) => {
+        positions.forEach((pos) => { words[pos] = word; });
+      });
+      return words.join(' ').trim();
+    } catch (_) {
+      return '';
+    }
+  };
+
   const normalizePaper = (record) => {
     if (!record) return null;
     const title = record.title || record.display_name || '';
-    const abstract = record.abstract || record.abstract_inverted_index
-      ? `Abstract reconstruction placeholder. Original abstract unavailable.`
-      : record.abstract || 'Abstract unavailable.';
+    const abstract = record.abstract
+      || (record.abstract_inverted_index ? reconstructAbstract(record.abstract_inverted_index) : '')
+      || 'Abstract unavailable.';
     const authors = record.authors || record.authorships?.map(a => a.author.display_name) || ['Unknown author'];
     const year = record.year || record.publication_year || (record.published ? new Date(record.published).getFullYear() : undefined);
     const venue = record.venue || record.primary_location?.source?.display_name || record.source || 'Unknown source';
