@@ -16,19 +16,9 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_KEY, {
   auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true },
 });
 
-<<<<<<< HEAD
-/**
- * Validates active cloud sessions and pulls down remote state 
- * BEFORE the React rendering tree begins.
- */
-const buildLocalPayload = () => ({
-  ss_settings: JSON.parse(localStorage.getItem('ss_settings') || '{}'),
-  ss_papers_pool: JSON.parse(localStorage.getItem('ss_papers_pool') || '[]'),
-  ss_affinity_profile: JSON.parse(localStorage.getItem('ss_affinity_profile') || '{}'),
-  ss_saved_stack: JSON.parse(localStorage.getItem('ss_saved_stack') || '[]')
-});
+// Shared client for the app (login UI, auth state) — one client, one session.
+export { supabase };
 
-=======
 const rawSet = localStorage.setItem.bind(localStorage);
 let pushReady = false; // only push after the initial pull/seed
 let pushTimer = null;
@@ -60,6 +50,13 @@ function schedulePush() {
   pushTimer = setTimeout(push, 1200);
 }
 
+// Manual push hook for the app (e.g., after a swipe). Gated exactly like the
+// automatic mirror: never push before the initial pull, or we'd reintroduce
+// the default-state-overwrites-cloud race that v2 fixed.
+export function pushToCloud() {
+  if (pushReady && currentSession) schedulePush();
+}
+
 // Mirror every app write to the cloud (debounced) — but only once pull is done.
 localStorage.setItem = (k, v) => {
   rawSet(k, v);
@@ -83,7 +80,6 @@ function withTimeout(promise, ms, fallback) {
 
 // Called by main.jsx BEFORE React renders. Resolves once localStorage
 // holds the right data (or quickly, if logged out / offline).
->>>>>>> parent of dc24e15 (Refactor cloud sync implementation and update comments)
 export async function startSync() {
   try {
     const res = await withTimeout(supabase.auth.getSession(), 3500, { data: { session: null } });
@@ -92,39 +88,6 @@ export async function startSync() {
     currentSession = null;
   }
 
-<<<<<<< HEAD
-    if (session && session.user) {
-      console.log("SpinStack secure handshake active:", session.user.email);
-      
-      const { data, error: fetchError } = await supabase
-        .from('user_state')
-        .select('data')
-        .eq('user_id', session.user.id)
-        .maybeSingle();
-
-      if (fetchError) throw fetchError;
-
-      if (data && data.data) {
-        console.log("Synching cloud down to local sandbox...");
-        Object.entries(data.data).forEach(([key, val]) => {
-          localStorage.setItem(key, typeof val === 'string' ? val : JSON.stringify(val));
-        });
-      } else {
-        console.log("No cloud record found, seeding user_state with local defaults.");
-        const payload = buildLocalPayload();
-        const { error: seedError } = await supabase.from('user_state').upsert({
-          user_id: session.user.id,
-          data: payload,
-          updated_at: new Date().toISOString()
-        });
-        if (seedError) throw seedError;
-      }
-    } else {
-      console.log("Running in localized decoupled state mode. No active session.");
-    }
-  } catch (err) {
-    printCloudSyncError(err);
-=======
   if (currentSession) {
     const applied = await withTimeout(pullIntoLocal(), 3500, false);
     if (!applied) await push().catch(() => {}); // first login → seed cloud from this device
@@ -135,7 +98,6 @@ export async function startSync() {
     document.addEventListener("DOMContentLoaded", buildUI);
   } else {
     buildUI();
->>>>>>> parent of dc24e15 (Refactor cloud sync implementation and update comments)
   }
 }
 
