@@ -158,7 +158,7 @@ async function askAI(provider, geminiKey, prompt) {
   if (provider === "gemini") {
     if (!geminiKey) throw new Error("Add your Gemini API key in Settings first.");
     const r = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${geminiKey}`,
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent?key=${geminiKey}`,
       { method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] }) });
     const d = await r.json();
