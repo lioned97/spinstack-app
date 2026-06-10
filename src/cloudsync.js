@@ -16,6 +16,13 @@ export const supabase = createClient(supabaseUrl, supabaseKey, {
  * Validates active cloud sessions and pulls down remote state 
  * BEFORE the React rendering tree begins.
  */
+const buildLocalPayload = () => ({
+  ss_settings: JSON.parse(localStorage.getItem('ss_settings') || '{}'),
+  ss_papers_pool: JSON.parse(localStorage.getItem('ss_papers_pool') || '[]'),
+  ss_affinity_profile: JSON.parse(localStorage.getItem('ss_affinity_profile') || '{}'),
+  ss_saved_stack: JSON.parse(localStorage.getItem('ss_saved_stack') || '[]')
+});
+
 export async function startSync() {
   try {
     const { data: { session }, error: sessionError } = await supabase.auth.getSession();
@@ -25,7 +32,6 @@ export async function startSync() {
     if (session && session.user) {
       console.log("SpinStack secure handshake active:", session.user.email);
       
-      // Pull down the single user-state matrix row assigned to this user uuid
       const { data, error: fetchError } = await supabase
         .from('user_state')
         .select('data')
@@ -36,10 +42,18 @@ export async function startSync() {
 
       if (data && data.data) {
         console.log("Synching cloud down to local sandbox...");
-        // Re-hydrate localStorage cleanly with data retrieved from Supabase
         Object.entries(data.data).forEach(([key, val]) => {
           localStorage.setItem(key, typeof val === 'string' ? val : JSON.stringify(val));
         });
+      } else {
+        console.log("No cloud record found, seeding user_state with local defaults.");
+        const payload = buildLocalPayload();
+        const { error: seedError } = await supabase.from('user_state').upsert({
+          user_id: session.user.id,
+          data: payload,
+          updated_at: new Date().toISOString()
+        });
+        if (seedError) throw seedError;
       }
     } else {
       console.log("Running in localized decoupled state mode. No active session.");
