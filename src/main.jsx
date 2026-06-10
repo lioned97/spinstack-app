@@ -1,6 +1,9 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
 
+// Cross-device sync layer (self-contained; does not modify the app).
+import "./cloudsync.js";
+
 // Your full app. After you upload spinstack-v5.jsx into this same /src folder,
 // this import picks it up. The file must end with `export default <Component>`.
 import App from "./spinstack-v5.jsx";
