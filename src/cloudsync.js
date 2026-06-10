@@ -1,14 +1,10 @@
 // ─────────────────────────────────────────────────────────────
-// SpinStack cross-device sync (Stage A)
-// Self-contained: mirrors the app's localStorage to Supabase and
-// pulls it back on login. Does NOT touch spinstack-v5.jsx.
+// SpinStack cross-device sync (Stage A, v2 — gated startup)
 //
-// How it works:
-//  • You log in with a magic link (passwordless email).
-//  • On login it pulls your saved state blob from Supabase into
-//    localStorage and reloads once so the app shows it.
-//  • Any later change the app writes to localStorage is debounced
-//    and pushed back up. Last-write-wins across devices.
+// Key fix vs v1: we PULL your cloud data into localStorage BEFORE
+// the React app boots (see startSync() called from main.jsx), and
+// we only start PUSHING after that pull finishes. This prevents the
+// app's default startup state from overwriting your synced data.
 // ─────────────────────────────────────────────────────────────
 import { createClient } from "@supabase/supabase-js";
 
@@ -21,71 +17,114 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_KEY, {
 });
 
 const rawSet = localStorage.setItem.bind(localStorage);
-let authed = false;
+let pushReady = false; // only push after the initial pull/seed
 let pushTimer = null;
+let currentSession = null;
+let statusEl = null;
+let panel = null;
 
-// ── full snapshot of app data (skip Supabase's own auth keys) ──
 function snapshot() {
   const o = {};
   for (let i = 0; i < localStorage.length; i++) {
     const k = localStorage.key(i);
-    if (k && !k.startsWith("sb-") && k !== "ss_synced") o[k] = localStorage.getItem(k);
+    if (k && !k.startsWith("sb-")) o[k] = localStorage.getItem(k);
   }
   return o;
 }
 
 async function push() {
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) return;
+  if (!currentSession) return;
   const { error } = await supabase.from(TABLE).upsert({
-    user_id: user.id, data: snapshot(), updated_at: new Date().toISOString(),
+    user_id: currentSession.user.id,
+    data: snapshot(),
+    updated_at: new Date().toISOString(),
   });
   setStatus(error ? "Sync error" : "Synced ✓", error ? "#f87171" : "#5eead4");
 }
 
 function schedulePush() {
   clearTimeout(pushTimer);
-  pushTimer = setTimeout(push, 1500);
+  pushTimer = setTimeout(push, 1200);
 }
 
-// Intercept every app write so changes sync automatically.
+// Mirror every app write to the cloud (debounced) — but only once pull is done.
 localStorage.setItem = (k, v) => {
   rawSet(k, v);
-  if (authed && k && !k.startsWith("sb-")) schedulePush();
+  if (pushReady && currentSession && k && !k.startsWith("sb-")) schedulePush();
 };
 
-async function pullThenWatch(user) {
-  setStatus("Syncing…", "#fbbf24");
+async function pullIntoLocal() {
   const { data, error } = await supabase
-    .from(TABLE).select("data").eq("user_id", user.id).maybeSingle();
-  if (error) { setStatus("Sync error", "#f87171"); return; }
-
+    .from(TABLE).select("data").eq("user_id", currentSession.user.id).maybeSingle();
+  if (error) return false;
   if (data && data.data && Object.keys(data.data).length) {
-    let changed = false;
-    for (const [k, v] of Object.entries(data.data)) {
-      if (localStorage.getItem(k) !== v) { rawSet(k, v); changed = true; }
-    }
-    // Reload once so React re-reads the freshly synced data.
-    if (changed && !sessionStorage.getItem("ss_synced")) {
-      sessionStorage.setItem("ss_synced", "1");
-      location.reload();
-      return;
-    }
-  } else {
-    // First login on this account: seed the cloud with current local data.
-    await push();
+    for (const [k, v] of Object.entries(data.data)) rawSet(k, v);
+    return true;
   }
-  setStatus("Synced ✓", "#5eead4");
+  return false;
 }
 
-// ── tiny floating login/status control (bottom-left) ──
-let statusEl, panel;
+function withTimeout(promise, ms, fallback) {
+  return Promise.race([promise, new Promise((r) => setTimeout(() => r(fallback), ms))]);
+}
+
+// Called by main.jsx BEFORE React renders. Resolves once localStorage
+// holds the right data (or quickly, if logged out / offline).
+export async function startSync() {
+  try {
+    const res = await withTimeout(supabase.auth.getSession(), 3500, { data: { session: null } });
+    currentSession = res?.data?.session || null;
+  } catch (_) {
+    currentSession = null;
+  }
+
+  if (currentSession) {
+    const applied = await withTimeout(pullIntoLocal(), 3500, false);
+    if (!applied) await push().catch(() => {}); // first login → seed cloud from this device
+    pushReady = true;
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", buildUI);
+  } else {
+    buildUI();
+  }
+}
+
+// Keep the control in sync with auth changes (sign out, token refresh).
+// We do NOT pull/reload here — startSync() owns the initial load, and the
+// magic-link return is a full page load that re-runs startSync().
+supabase.auth.onAuthStateChange((event, session) => {
+  const wasSignedIn = !!currentSession;
+  currentSession = session || null;
+  if (statusEl) renderAuth();
+  // If a brand-new sign-in happened in THIS tab (no full reload), reload once
+  // so the app boots through startSync() with the pulled data.
+  if (event === "SIGNED_IN" && !wasSignedIn && !sessionStorage.getItem("ss_boot")) {
+    sessionStorage.setItem("ss_boot", "1");
+    location.reload();
+  }
+  if (event === "SIGNED_OUT") sessionStorage.removeItem("ss_boot");
+});
+
+// ── floating control (bottom-left) ──
 function setStatus(text, color) {
   if (statusEl) { statusEl.textContent = text; statusEl.style.color = color || "#9ca3af"; }
 }
 
+function mkBtn(label) {
+  const b = document.createElement("button");
+  b.textContent = label;
+  b.style.cssText =
+    "width:100%;padding:8px;border-radius:8px;border:1px solid #1f2937;" +
+    "background:#111827;color:#5eead4;cursor:pointer;margin-top:6px;";
+  return b;
+}
+
+let wrap = null;
 function buildUI() {
-  const wrap = document.createElement("div");
+  if (wrap) return; // build exactly once
+  wrap = document.createElement("div");
   wrap.style.cssText =
     "position:fixed;left:10px;bottom:10px;z-index:99999;font:12px/1.4 system-ui,sans-serif;";
 
@@ -101,86 +140,54 @@ function buildUI() {
     "display:none;margin-top:8px;background:#0b0f14;border:1px solid #1f2937;border-radius:12px;" +
     "padding:12px;width:230px;box-shadow:0 6px 24px rgba(0,0,0,.5);color:#e5e7eb;";
   wrap.appendChild(panel);
-
   btn.onclick = () => { panel.style.display = panel.style.display === "none" ? "block" : "none"; };
 
+  document.body.appendChild(wrap);
+  renderAuth();
+}
+
+// Fully synchronous rebuild — no async appends, so it can never duplicate.
+function renderAuth() {
+  if (!panel) return;
+  panel.replaceChildren();
+
   statusEl = document.createElement("div");
-  statusEl.style.cssText = "margin-bottom:8px;color:#9ca3af;";
-  statusEl.textContent = "Not signed in";
+  statusEl.style.cssText = "margin-bottom:8px;";
   panel.appendChild(statusEl);
 
-  renderAuth();
-  document.body.appendChild(wrap);
-}
+  if (currentSession) {
+    setStatus("Synced ✓", "#5eead4");
+    const who = document.createElement("div");
+    who.style.cssText = "color:#9ca3af;margin-bottom:4px;font-size:11px;";
+    who.textContent = currentSession.user.email;
+    panel.appendChild(who);
 
-function renderAuth() {
-  // clear everything after the status line
-  while (panel.children.length > 1) panel.removeChild(panel.lastChild);
-
-  supabase.auth.getSession().then(({ data: { session } }) => {
-    if (session) {
-      authed = true;
-      statusEl.textContent = "Synced ✓";
-      statusEl.style.color = "#5eead4";
-      const who = document.createElement("div");
-      who.style.cssText = "color:#9ca3af;margin-bottom:8px;font-size:11px;";
-      who.textContent = session.user.email;
-      const out = mkBtn("Sign out");
-      out.onclick = async () => {
-        await supabase.auth.signOut();
-        sessionStorage.removeItem("ss_synced");
-        authed = false; renderAuth();
-      };
-      const now = mkBtn("Sync now");
-      now.style.marginBottom = "6px";
-      now.onclick = () => push();
-      panel.appendChild(who); panel.appendChild(now); panel.appendChild(out);
-    } else {
-      authed = false;
-      statusEl.textContent = "Sign in to sync across devices";
-      statusEl.style.color = "#9ca3af";
-      const email = document.createElement("input");
-      email.type = "email"; email.placeholder = "your email";
-      email.style.cssText =
-        "width:100%;box-sizing:border-box;margin-bottom:8px;padding:8px;border-radius:8px;" +
-        "border:1px solid #1f2937;background:#111827;color:#e5e7eb;";
-      const send = mkBtn("Email me a login link");
-      send.onclick = async () => {
-        if (!email.value.trim()) return;
-        send.textContent = "Sending…";
-        const { error } = await supabase.auth.signInWithOtp({
-          email: email.value.trim(),
-          options: { emailRedirectTo: location.origin },
-        });
-        send.textContent = error ? "Error — retry" : "Check your email ✉";
-      };
-      panel.appendChild(email); panel.appendChild(send);
-    }
-  });
-}
-
-function mkBtn(label) {
-  const b = document.createElement("button");
-  b.textContent = label;
-  b.style.cssText =
-    "width:100%;padding:8px;border-radius:8px;border:1px solid #1f2937;" +
-    "background:#111827;color:#5eead4;cursor:pointer;";
-  return b;
-}
-
-supabase.auth.onAuthStateChange((event, session) => {
-  if (session && session.user) {
-    authed = true;
-    if (statusEl) renderAuth();
-    pullThenWatch(session.user);
+    const now = mkBtn("Sync now");
+    now.onclick = () => push();
+    const out = mkBtn("Sign out");
+    out.onclick = async () => { await supabase.auth.signOut(); };
+    panel.appendChild(now);
+    panel.appendChild(out);
   } else {
-    authed = false;
-    if (statusEl) renderAuth();
-  }
-});
+    setStatus("Sign in to sync across devices", "#9ca3af");
+    const email = document.createElement("input");
+    email.type = "email";
+    email.placeholder = "your email";
+    email.style.cssText =
+      "width:100%;box-sizing:border-box;padding:8px;border-radius:8px;" +
+      "border:1px solid #1f2937;background:#111827;color:#e5e7eb;";
+    panel.appendChild(email);
 
-if (document.readyState === "loading") {
-  document.addEventListener("DOMContentLoaded", buildUI);
-} else {
-  buildUI();
+    const send = mkBtn("Email me a login link");
+    send.onclick = async () => {
+      if (!email.value.trim()) return;
+      send.textContent = "Sending…";
+      const { error } = await supabase.auth.signInWithOtp({
+        email: email.value.trim(),
+        options: { emailRedirectTo: location.origin },
+      });
+      send.textContent = error ? "Error — retry" : "Check your email ✉";
+    };
+    panel.appendChild(send);
+  }
 }
