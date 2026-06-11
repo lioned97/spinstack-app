@@ -20,12 +20,17 @@ import {
   MessageCircle,
   Send,
   Paperclip,
+  Newspaper,
+  Network,
+  Plus,
+  Map as MapIcon,
 } from "lucide-react";
 import { sGet, persist, onSyncStatus } from "./sync.js";
 import { savePdf, loadPdf } from "./pdfstore.js";
 
-// pdf.js rides in its own chunk — only loaded when a PDF is opened
+// pdf.js / leaflet ride in their own chunks — loaded on first use
 const Reader = React.lazy(() => import("./Reader.jsx"));
+const MapView = React.lazy(() => import("./MapView.jsx"));
 
 const HARVEST_URL =
   "https://raw.githubusercontent.com/lioned97/spinstack-harvest/main/papers/latest.json";
@@ -95,6 +100,21 @@ const isArxivUrl = (u) => {
   } catch {
     return false;
   }
+};
+
+// Semantic Scholar lookup id for the related-papers graph
+const s2IdOf = (p) => {
+  if (p.doi) return `DOI:${p.doi}`;
+  const ax = arxivIdOf(p);
+  if (ax) return `ARXIV:${ax}`;
+  if (typeof p.id === "string") {
+    if (p.id.startsWith("s2:")) return p.id.slice(3);
+    if (p.id.startsWith("doi:")) return `DOI:${p.id.slice(4)}`;
+  }
+  // OpenAlex-live items carry the DOI as a URL in id/url
+  const m = `${p.id || ""} ${p.url || ""}`.match(/doi\.org\/(10\.\S+?)(?:[\s"']|$)/i);
+  if (m) return `DOI:${m[1]}`;
+  return null;
 };
 
 const isDefaultTopic = (t) =>
@@ -171,7 +191,9 @@ function normalizeWiki(page, { tag, venue, host }) {
   const extract = (page.extract || "").trim();
   if (!title || extract.length < 120 || extract.includes("may refer to")) return null;
   const thumb = page.thumbnail?.source;
+  const coord = page.coordinates?.[0];
   return {
+    ...(coord && coord.lat != null ? { coordinates: [coord.lat, coord.lon] } : {}),
     id: `${tag}:${page.pageid}`,
     title,
     abstract: extract.slice(0, 1200),
@@ -195,7 +217,7 @@ async function fetchWiki(topicName, src) {
   const url =
     `https://${src.host}/w/api.php?action=query&generator=search` +
     `&gsrsearch=${encodeURIComponent(topicName)}&gsrlimit=6` +
-    `&prop=extracts%7Cpageimages&exintro=1&explaintext=1` +
+    `&prop=extracts%7Cpageimages%7Ccoordinates&exintro=1&explaintext=1` +
     `&piprop=thumbnail&pithumbsize=640&format=json&origin=*`;
   const res = await fetch(url);
   if (!res.ok) return [];
@@ -304,6 +326,8 @@ export default function App() {
   const [chatBusy, setChatBusy] = useState(false);
   const [chatDraft, setChatDraft] = useState("");
   const [lightbox, setLightbox] = useState(null); // dataURL of full-screen figure
+  const [showMap, setShowMap] = useState(false); // travel places map overlay
+  const [related, setRelated] = useState({}); // {paperId: {loading, items}} — session cache
   const [settings, setSettings] = useState(() =>
     sGet("ss2_settings", {
       uiMode: "feed",
@@ -425,6 +449,7 @@ export default function App() {
                 pdfLocal: p.pdfLocal ?? old.pdfLocal,
                 figures: p.figures ?? old.figures,
                 figuresTried: p.figuresTried ?? old.figuresTried,
+                coordinates: p.coordinates ?? old.coordinates,
               }
             : p
         );
@@ -576,6 +601,105 @@ export default function App() {
     () => triage.filter((p) => (p.harvestedAt || "") > (lastSeen || "")).length,
     [triage, lastSeen]
   );
+
+  // travel items pinnable on the map (need harvested coordinates)
+  const mapItems = useMemo(
+    () => categoryTriage.filter((p) => catOf(p) === "travel" && Array.isArray(p.coordinates)),
+    [categoryTriage]
+  );
+
+  // weekly digest (#3): what landed in the last 7 days, what you saved,
+  // which topics were hot — all client-side from the pool
+  const digest = useMemo(() => {
+    const weekAgo = new Date(Date.now() - 7 * 864e5).toISOString();
+    const fresh = pool.filter((p) => (p.harvestedAt || "") > weekAgo);
+    const score = (p) => scoreCard(p, visibleTopics, affinity);
+    const top = {};
+    for (const c of CATEGORIES) {
+      top[c] = fresh
+        .filter((p) => catOf(p) === c && !saved[p.id] && !skipped[p.id])
+        .map((p) => ({ ...p, _score: score(p) }))
+        .sort((a, b) => b._score - a._score)
+        .slice(0, 5);
+    }
+    const topicCounts = visibleTopics
+      .map((t) => ({
+        name: t.name,
+        n: fresh.filter((p) =>
+          `${p.title} ${p.abstract || ""}`.toLowerCase().includes(t.name.toLowerCase())
+        ).length,
+      }))
+      .filter((x) => x.n > 0)
+      .sort((a, b) => b.n - a.n)
+      .slice(0, 8);
+    const savedWeek = Object.values(saved)
+      .filter((p) => (p.savedAt || "") > weekAgo)
+      .sort((a, b) => (b.savedAt || "").localeCompare(a.savedAt || ""));
+    return { freshCount: fresh.length, top, topicCounts, savedWeek };
+  }, [pool, visibleTopics, affinity, saved, skipped]);
+
+  // related papers (#4): Semantic Scholar citations + references,
+  // scored against your profile, top 5
+  async function toggleRelated(p) {
+    if (related[p.id]) {
+      setRelated((r) => {
+        const next = { ...r };
+        delete next[p.id];
+        return next;
+      });
+      return;
+    }
+    const sid = s2IdOf(p);
+    if (!sid) return showToast("No DOI/arXiv id — can't look up related papers");
+    setRelated((r) => ({ ...r, [p.id]: { loading: true, items: [] } }));
+    try {
+      const fields = "title,abstract,year,venue,authors,externalIds,url,openAccessPdf";
+      const found = [];
+      let okCalls = 0;
+      for (const kind of ["citations", "references"]) {
+        try {
+          const res = await fetch(
+            `https://api.semanticscholar.org/graph/v1/paper/${encodeURIComponent(sid)}/${kind}?limit=30&fields=${fields}`
+          );
+          if (res.ok) {
+            okCalls++;
+            const d = await res.json();
+            for (const row of d.data || []) {
+              const n = normalizeS2(row.citingPaper || row.citedPaper);
+              if (n && qualityFilter(n)) found.push(n);
+            }
+          }
+        } catch {}
+        await new Promise((r2) => setTimeout(r2, 350)); // S2 rate-limit courtesy
+      }
+      if (okCalls === 0) throw new Error("s2 unreachable");
+      const seen = new Set([p.id]);
+      const top = found
+        .filter((x) => !seen.has(x.id) && seen.add(x.id))
+        .map((x) => ({ ...x, _score: scoreCard(x, visibleTopics, affinity) }))
+        .sort((a, b) => b._score - a._score)
+        .slice(0, 5);
+      setRelated((r) => ({ ...r, [p.id]: { loading: false, items: top } }));
+      if (top.length === 0) showToast("No related papers found");
+    } catch {
+      setRelated((r) => {
+        const next = { ...r };
+        delete next[p.id];
+        return next;
+      });
+      showToast("Related lookup failed (rate limit?) — try again in a minute");
+    }
+  }
+
+  function addToPool(x) {
+    setPool((prev) => {
+      if (prev.some((q) => q.id === x.id)) return prev;
+      const merged = [{ ...x, harvestedAt: nowISO() }, ...prev];
+      localStorage.setItem("ss2_pool", JSON.stringify(merged));
+      return merged;
+    });
+    showToast("Added to your feed");
+  }
 
   // App-icon badge (where the platform supports it)
   useEffect(() => {
@@ -1293,6 +1417,17 @@ export default function App() {
               </button>
             ))}
           </div>
+          {activeCategory === "travel" && (
+            <button
+              className="chip map-chip"
+              onClick={() =>
+                mapItems.length ? setShowMap(true) : showToast("No pinned places yet — they arrive with the next harvest")
+              }
+              title="Show harvested places on a map"
+            >
+              <MapIcon size={12} style={{ verticalAlign: "-2px" }} /> MAP
+            </button>
+          )}
         </div>
       )}
 
@@ -1412,6 +1547,33 @@ export default function App() {
                         {analyses[p.id].text}
                       </div>
                     )}
+                    {related[p.id] && (
+                      <div className="related">
+                        <div className="section-h" style={{ margin: "8px 0 2px" }}>
+                          {related[p.id].loading ? "Finding related papers…" : "Related papers"}
+                        </div>
+                        {related[p.id].items.map((x) => (
+                          <div className="subrow" key={x.id}>
+                            <div className="grow">
+                              <a href={x.url || "#"} target="_blank" rel="noreferrer" className="title">
+                                {x.title}
+                              </a>
+                              <div className="sub">
+                                {x.year} · {String(x.venue || "").slice(0, 36)} · match{" "}
+                                {x._score.toFixed(2)}
+                              </div>
+                            </div>
+                            <button
+                              onClick={() => addToPool(x)}
+                              title="Add to feed"
+                              aria-label={`Add ${x.title} to feed`}
+                            >
+                              <Plus size={15} color="var(--teal)" />
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
                   </div>
                   <button
                     onClick={() =>
@@ -1424,6 +1586,15 @@ export default function App() {
                   >
                     <Sparkles size={16} color={analyzingId === p.id ? "var(--teal)" : "var(--dim)"} />
                   </button>
+                  {catOf(p) === "science" && (
+                    <button
+                      onClick={() => toggleRelated(p)}
+                      title="Related papers"
+                      aria-label="Related papers"
+                    >
+                      <Network size={16} color={related[p.id] ? "var(--teal)" : "var(--dim)"} />
+                    </button>
+                  )}
                   {canRead(p) ? (
                     <button onClick={() => openReader(p)} title="Read PDF" aria-label="Read PDF">
                       <BookOpen size={16} color="var(--dim)" />
@@ -1449,6 +1620,80 @@ export default function App() {
                   </button>
                 </div>
               ))
+          )}
+        </main>
+      )}
+
+      {tab === "digest" && (
+        <main>
+          <div className="section-h" style={{ marginTop: 8 }}>This week</div>
+          <p className="hint" style={{ marginTop: 2 }}>
+            {digest.freshCount} new item{digest.freshCount === 1 ? "" : "s"} harvested in the last 7
+            days · {digest.savedWeek.length} saved by you.
+          </p>
+          {digest.topicCounts.length > 0 && (
+            <>
+              <div className="section-h">Hot topics</div>
+              <div className="chips" style={{ marginTop: 4 }}>
+                {digest.topicCounts.map((t) => (
+                  <span key={t.name} className="chip method">
+                    {t.name} · {t.n}
+                  </span>
+                ))}
+              </div>
+            </>
+          )}
+          {CATEGORIES.map((c) =>
+            digest.top[c].length === 0 ? null : (
+              <div key={c}>
+                <div className="section-h">Top {c} this week</div>
+                {digest.top[c].map((p) => (
+                  <div className="row" key={p.id}>
+                    <div className="grow">
+                      <div className="title">{p.title}</div>
+                      <div className="sub">
+                        {p.year} · {String(p.venue || p.source || "").slice(0, 36)} · match{" "}
+                        {p._score.toFixed(2)}
+                      </div>
+                    </div>
+                    <button onClick={() => verdict(p, true)} title="Save" aria-label={`Save ${p.title}`}>
+                      <Heart size={15} color="var(--red)" />
+                    </button>
+                    {p.url && (
+                      <a href={p.url} target="_blank" rel="noreferrer" aria-label="Open">
+                        <ExternalLink size={15} color="var(--dim)" />
+                      </a>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )
+          )}
+          {digest.savedWeek.length > 0 && (
+            <>
+              <div className="section-h">Saved this week</div>
+              {digest.savedWeek.map((p) => (
+                <div className="row" key={p.id}>
+                  <div className="grow">
+                    <div className="title">{p.title}</div>
+                    <div className="sub">
+                      {p.year} · {String(p.venue || "").slice(0, 40)}
+                    </div>
+                  </div>
+                  {p.url && (
+                    <a href={p.url} target="_blank" rel="noreferrer" aria-label="Open">
+                      <ExternalLink size={15} color="var(--dim)" />
+                    </a>
+                  )}
+                </div>
+              ))}
+            </>
+          )}
+          {digest.freshCount === 0 && (
+            <div className="empty">
+              <div className="big">Quiet week so far</div>
+              The harvester runs daily at 06:00 UTC — check back after the next run.
+            </div>
           )}
         </main>
       )}
@@ -1683,6 +1928,10 @@ export default function App() {
           <Bookmark size={18} />
           SAVED
         </button>
+        <button className={tab === "digest" ? "on" : ""} onClick={() => setTab("digest")}>
+          <Newspaper size={18} />
+          DIGEST
+        </button>
         <button className={tab === "topics" ? "on" : ""} onClick={() => setTab("topics")}>
           <Hash size={18} />
           TOPICS
@@ -1712,6 +1961,18 @@ export default function App() {
             onAction={(mode, { selection }) => handlePaperAI(mode, readingPaper.paper, selection)}
             showToast={showToast}
           />
+        </Suspense>
+      )}
+
+      {showMap && (
+        <Suspense
+          fallback={
+            <div className="map-overlay">
+              <div className="empty">Loading map…</div>
+            </div>
+          }
+        >
+          <MapView items={mapItems} onClose={() => setShowMap(false)} />
         </Suspense>
       )}
 

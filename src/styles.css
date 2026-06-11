@@ -96,9 +96,9 @@ a:hover { text-decoration: underline; }
 }
 .tabs button {
   display: flex; flex-direction: column; align-items: center; gap: 3px;
-  padding: 6px 14px; border-radius: 10px;
-  color: var(--dim); font-size: 11px; font-family: var(--mono);
-  letter-spacing: 0.04em;
+  padding: 6px 11px; border-radius: 10px;
+  color: var(--dim); font-size: 10.5px; font-family: var(--mono);
+  letter-spacing: 0.03em;
 }
 .tabs button.on { color: var(--teal); background: var(--teal-bg); }
 .tabs button .nbadge {
@@ -255,7 +255,30 @@ a:hover { text-decoration: underline; }
 }
 
 /* ── category switcher (Stack) ── */
-.catbar { display: flex; justify-content: center; margin-bottom: 8px; }
+.catbar { display: flex; justify-content: center; align-items: center; gap: 8px; margin-bottom: 8px; }
+.chip.map-chip { color: var(--teal); border-color: var(--teal-border); background: var(--panel); }
+
+/* ── travel places map ── */
+.map-overlay {
+  position: fixed; inset: 0; z-index: 75;
+  background: var(--bg); display: flex; flex-direction: column;
+}
+.map-canvas { flex: 1; }
+.map-pin {
+  background: var(--red); border: 2px solid #fff; border-radius: 50%;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.45);
+}
+.leaflet-popup-content { font-family: var(--sans); font-size: 13px; line-height: 1.4; }
+
+/* ── related papers (saved rows) ── */
+.subrow {
+  display: flex; align-items: center; gap: 8px;
+  padding: 7px 0 7px 10px; border-left: 2px solid var(--teal-border);
+  margin: 4px 0;
+}
+.subrow .title { font-size: 13px; font-weight: 500; color: var(--ink); display: block; }
+.subrow .title:hover { color: var(--teal); text-decoration: none; }
+.subrow .sub { font-family: var(--mono); font-size: 10.5px; color: var(--dim); margin-top: 1px; }
 
 /* ── travel card: thumbnail + carousel + MATCH label ── */
 .thumbrow { display: flex; gap: 12px; align-items: flex-start; margin-bottom: 6px; }
