@@ -230,8 +230,11 @@ function PageView({ pdf, num, scale, active, pageW, pageH, annots, onHighlightTa
         });
         await task.render();
         if (!cancelled) setTextReady((x) => x + 1);
-      } catch {
+      } catch (e) {
         /* render cancelled mid-scroll or page failed — placeholder stays */
+        if (!String(e?.name).includes("RenderingCancelled")) {
+          console.error("pageview:", e?.message || e);
+        }
       }
     })();
     return () => {

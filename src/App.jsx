@@ -19,8 +19,10 @@ import {
   Landmark,
   MessageCircle,
   Send,
+  Paperclip,
 } from "lucide-react";
 import { sGet, persist, onSyncStatus } from "./sync.js";
+import { savePdf, loadPdf } from "./pdfstore.js";
 
 // pdf.js rides in its own chunk — only loaded when a PDF is opened
 const Reader = React.lazy(() => import("./Reader.jsx"));
@@ -332,6 +334,8 @@ export default function App() {
   const [drag, setDrag] = useState({ x: 0, active: false });
   const dragStart = useRef(0);
   const chatMsgsRef = useRef(null);
+  const fileInputRef = useRef(null);
+  const uploadTargetRef = useRef(null); // paper awaiting a PDF file pick
 
   // keep the chat scrolled to the newest message
   useEffect(() => {
@@ -418,6 +422,7 @@ export default function App() {
             ? {
                 ...p,
                 pdf: p.pdf ?? old.pdf,
+                pdfLocal: p.pdfLocal ?? old.pdfLocal,
                 figures: p.figures ?? old.figures,
                 figuresTried: p.figuresTried ?? old.figuresTried,
               }
@@ -798,11 +803,56 @@ export default function App() {
     persist("ss2_ink", ni);
   }
 
-  // resolution order: paper.pdf → arXiv id → Unpaywall (needs email) → none
+  // resolution order: uploaded file → paper.pdf → arXiv id → Unpaywall (needs email) → none
   const canRead = (p) =>
-    !!(p.pdf || arxivIdOf(p) || (p.doi && settings.email));
+    !!(p.pdfLocal || p.pdf || arxivIdOf(p) || (p.doi && settings.email));
+
+  // ── manual PDF upload (the app can't fetch it → the user attaches it) ──
+  function pickPdfFor(p) {
+    uploadTargetRef.current = p;
+    fileInputRef.current?.click();
+  }
+
+  async function onPdfPicked(e) {
+    const file = e.target.files?.[0];
+    e.target.value = ""; // allow re-picking the same file later
+    const p = uploadTargetRef.current;
+    uploadTargetRef.current = null;
+    if (!file || !p) return;
+    if (file.type !== "application/pdf" && !file.name.toLowerCase().endsWith(".pdf")) {
+      return showToast("That's not a PDF file");
+    }
+    try {
+      await savePdf(p.id, file);
+      setPool((prev) => {
+        const merged = prev.map((x) => (x.id === p.id ? { ...x, pdfLocal: true } : x));
+        localStorage.setItem("ss2_pool", JSON.stringify(merged));
+        return merged;
+      });
+      // saved papers carry their own copy of the record — flag it there too
+      if (saved[p.id]) {
+        const ns = { ...saved, [p.id]: { ...saved[p.id], pdfLocal: true } };
+        setSaved(ns);
+        persist("ss2_saved", ns);
+      }
+      showToast("PDF attached — opening…");
+      setReadingPaper({ paper: p, url: URL.createObjectURL(file), local: true });
+    } catch {
+      showToast("Couldn't store the PDF on this device");
+    }
+  }
 
   async function openReader(p) {
+    // a locally-uploaded PDF (IndexedDB) always wins — it's what the user chose
+    if (p.pdfLocal) {
+      try {
+        const blob = await loadPdf(p.id);
+        if (blob) {
+          setReadingPaper({ paper: p, url: URL.createObjectURL(blob), local: true });
+          return;
+        }
+      } catch {}
+    }
     let pdfUrl = p.pdf || null;
     const ax = arxivIdOf(p);
     if (!pdfUrl && ax) pdfUrl = `https://arxiv.org/pdf/${ax}`;
@@ -838,6 +888,11 @@ export default function App() {
     // arXiv goes through our proxy (CORS); other hosts are tried direct
     const fetchUrl = isArxivUrl(pdfUrl) ? `/api/pdf?url=${encodeURIComponent(pdfUrl)}` : pdfUrl;
     setReadingPaper({ paper: p, url: fetchUrl });
+  }
+
+  function closeReader() {
+    if (readingPaper?.local) URL.revokeObjectURL(readingPaper.url);
+    setReadingPaper(null);
   }
 
   // ── paper chat (C2) ──
@@ -1015,7 +1070,7 @@ export default function App() {
   }
 
   // ── card renderer (shared by feed + deck) ──
-  function PaperCard({ p, deck = false, style }) {
+  function PaperCard({ p, deck = false, eager = false, style }) {
     const isNew = (p.harvestedAt || "") > (lastSeen || "");
     const an = analyses[p.id];
     const open = !!expanded[p.id];
@@ -1024,13 +1079,15 @@ export default function App() {
     const imgs = (p.images || []).filter(Boolean);
     const score = p._score ?? scoreCard(p, visibleTopics, affinity);
 
-    // lazy figure extraction for opened science arXiv cards (once per device)
+    // figure extraction (once per device): eagerly for the top of the feed
+    // and the deck card so closed cards show figures too, lazily on "More"
+    // for the rest
     useEffect(() => {
-      if (open && cat === "science" && !p.figures && !p.figuresTried && arxivIdOf(p)) {
+      if ((open || eager) && cat === "science" && !p.figures && !p.figuresTried && arxivIdOf(p)) {
         loadFigures(p);
       }
       // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [open]);
+    }, [open, eager]);
     return (
       <article className={`card${deck && drag.active ? " dragging" : ""}`} style={style}>
         <div className="eyebrow">
@@ -1040,7 +1097,9 @@ export default function App() {
               : `${cat} · ${p.source || p.venue || ""}`}
           </span>
           <span>{p.year}</span>
-          {cat === "science" && p.venue && <span>· {String(p.venue).slice(0, 36)}</span>}
+          {cat === "science" && p.venue && String(p.venue).toLowerCase() !== String(p.source || "").toLowerCase() && (
+            <span>· {String(p.venue).slice(0, 36)}</span>
+          )}
           {isNew && <span style={{ color: "var(--red)" }}>· NEW</span>}
         </div>
         {layout.thumb && imgs.length > 0 && !open ? (
@@ -1064,9 +1123,9 @@ export default function App() {
             ))}
           </div>
         )}
-        {open && cat === "science" && (p.figures || []).length > 0 && (
+        {cat === "science" && (p.figures || []).length > 0 && (
           <div className="figrow">
-            {p.figures.slice(0, 3).map((src, i) => (
+            {p.figures.slice(0, open ? 3 : 2).map((src, i) => (
               <img key={i} src={src} loading="lazy" alt={`Figure ${i + 1}`} onClick={() => setLightbox(src)} />
             ))}
           </div>
@@ -1129,20 +1188,29 @@ export default function App() {
               <BookOpen size={15} style={{ verticalAlign: "-3px" }} />
             </button>
           ) : (
-            settings.libraryProxy &&
-            p.url && (
+            <>
+              {settings.libraryProxy && p.url && (
+                <button
+                  className="btn ghost"
+                  onClick={() => {
+                    window.open(settings.libraryProxy + encodeURIComponent(p.url), "_blank");
+                    showToast("Opening via library proxy");
+                  }}
+                  title="Open via library"
+                  aria-label="Open via library"
+                >
+                  <Landmark size={15} style={{ verticalAlign: "-3px" }} />
+                </button>
+              )}
               <button
                 className="btn ghost"
-                onClick={() => {
-                  window.open(settings.libraryProxy + encodeURIComponent(p.url), "_blank");
-                  showToast("Opening via library proxy");
-                }}
-                title="Open via library"
-                aria-label="Open via library"
+                onClick={() => pickPdfFor(p)}
+                title="Attach a PDF file for the reader"
+                aria-label="Attach PDF"
               >
-                <Landmark size={15} style={{ verticalAlign: "-3px" }} />
+                <Paperclip size={15} style={{ verticalAlign: "-3px" }} />
               </button>
-            )
+            </>
           )}
           <button className="btn ghost" onClick={() => openChat(p)} title="Chat about this paper" aria-label="Chat about this paper">
             <MessageCircle size={15} style={{ verticalAlign: "-3px" }} />
@@ -1272,7 +1340,7 @@ export default function App() {
               <div style={{ marginTop: 16 }}>{rerunButton}</div>
             </div>
           ) : (
-            feedList.slice(0, 60).map((p) => <PaperCard key={p.id} p={p} />)
+            feedList.slice(0, 60).map((p, i) => <PaperCard key={p.id} p={p} eager={i < 6} />)
           )}
         </main>
       )}
@@ -1301,6 +1369,7 @@ export default function App() {
                 <PaperCard
                   p={deckPaper}
                   deck
+                  eager
                   style={{
                     transform: `translateX(${drag.x}px) rotate(${drag.x / 24}deg)`,
                     opacity: 1 - Math.min(0.5, Math.abs(drag.x) / 400),
@@ -1355,9 +1424,13 @@ export default function App() {
                   >
                     <Sparkles size={16} color={analyzingId === p.id ? "var(--teal)" : "var(--dim)"} />
                   </button>
-                  {canRead(p) && (
+                  {canRead(p) ? (
                     <button onClick={() => openReader(p)} title="Read PDF" aria-label="Read PDF">
                       <BookOpen size={16} color="var(--dim)" />
+                    </button>
+                  ) : (
+                    <button onClick={() => pickPdfFor(p)} title="Attach PDF" aria-label="Attach PDF">
+                      <Paperclip size={16} color="var(--dim)" />
                     </button>
                   )}
                   <button onClick={() => openChat(p)} title="Chat" aria-label="Chat about this paper">
@@ -1515,8 +1588,10 @@ export default function App() {
             <label>Travel article feeds</label>
             <textarea
               className="input"
-              rows={3}
-              placeholder="https://www.atlasobscura.com/feeds/latest"
+              rows={4}
+              placeholder={
+                "Defaults when empty:\nAtlas Obscura (latest + places), Nomadic Matt,\nAdventurous Kate, Earth Trekkers.\nAdd your own — one RSS/Atom URL per line."
+              }
               value={feedsText}
               onChange={(e) => setFeedsText(e.target.value)}
               onBlur={() =>
@@ -1633,7 +1708,7 @@ export default function App() {
             onSave={(list) => saveAnnotsFor(readingPaper.paper.id, list)}
             ink={ink[readingPaper.paper.id] || []}
             onSaveInk={(list) => saveInkFor(readingPaper.paper.id, list)}
-            onClose={() => setReadingPaper(null)}
+            onClose={closeReader}
             onAction={(mode, { selection }) => handlePaperAI(mode, readingPaper.paper, selection)}
             showToast={showToast}
           />
@@ -1741,6 +1816,14 @@ export default function App() {
           </div>
         </div>
       )}
+
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept="application/pdf"
+        style={{ display: "none" }}
+        onChange={onPdfPicked}
+      />
 
       {toast && <div className="toast">{toast}</div>}
     </div>

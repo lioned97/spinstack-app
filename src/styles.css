@@ -34,12 +34,12 @@
   --panel-2: #eef1f4;
   --line: #d9dfe6;
   --ink: #16202b;
-  --dim: #5b6878;
-  --red: #d8423f;
+  --dim: #536577;
+  --red: #c8403d;
   --teal: #0c8d80;
-  --teal-bg: rgba(12, 141, 128, 0.08);
+  --teal-bg: rgba(12, 141, 128, 0.14);
   --teal-border: rgba(12, 141, 128, 0.45);
-  --red-border: rgba(216, 66, 63, 0.55);
+  --red-border: rgba(200, 64, 61, 0.55);
   --tabs-bg: rgba(244, 246, 248, 0.92);
 }
 
@@ -161,7 +161,8 @@ a:hover { text-decoration: underline; }
 .odmr .lbl b { color: var(--red); font-weight: 600; }
 
 /* ── card actions ── */
-.actions { display: flex; gap: 8px; margin-top: 14px; }
+.actions { display: flex; gap: 8px; margin-top: 14px; flex-wrap: wrap; }
+.btn.skip, .btn.save { min-width: 96px; }
 .btn {
   flex: 1; padding: 11px 0; border-radius: 10px;
   font-size: 14px; font-weight: 600; text-align: center;
@@ -291,10 +292,15 @@ textarea.input { font: inherit; resize: vertical; line-height: 1.5; }
   display: flex; flex-direction: column;
 }
 .reader-hdr {
-  display: flex; align-items: center; gap: 10px;
-  padding: 10px 12px calc(10px);
+  display: flex; align-items: center; gap: 2px;
+  padding: 6px 8px;
   border-bottom: 1px solid var(--line);
-  padding-top: calc(10px + env(safe-area-inset-top));
+  padding-top: calc(6px + env(safe-area-inset-top));
+}
+.reader-hdr button {
+  min-width: 40px; min-height: 40px;
+  display: inline-flex; align-items: center; justify-content: center;
+  border-radius: 8px;
 }
 .reader-title {
   font-size: 13px; font-weight: 600;
@@ -416,6 +422,15 @@ textarea.input { font: inherit; resize: vertical; line-height: 1.5; }
 
 .spin { animation: rot 1s linear infinite; }
 @keyframes rot { to { transform: rotate(360deg); } }
+
+/* ── phone-width tuning ── */
+@media (max-width: 430px) {
+  .hdr .readout { display: none; } /* tab name + count crowds the mode toggle */
+  .mode button { padding: 4px 9px; font-size: 10px; }
+  .btn.ghost { padding: 11px 11px; }
+  .row .grow form { flex-wrap: wrap; }
+  .reader-title { max-width: 40%; }
+}
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }
