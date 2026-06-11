@@ -324,6 +324,29 @@ textarea.input { font: inherit; resize: vertical; line-height: 1.5; }
 }
 .pdf-textlayer ::selection { background: rgba(77, 216, 199, 0.4); }
 
+/* ── ink + whiteboard ── */
+.ink-layer {
+  position: absolute; inset: 0; z-index: 3;
+  pointer-events: none;
+}
+.ink-layer.active { pointer-events: auto; touch-action: none; cursor: crosshair; }
+.ink-dot {
+  display: inline-block; width: 15px; height: 15px; border-radius: 50%;
+  border: 2px solid var(--line); vertical-align: -3px;
+}
+.tool-on { background: var(--teal-bg); border-radius: 8px; }
+.board-overlay {
+  position: fixed; inset: 0; z-index: 75;
+  background: var(--bg); display: flex; flex-direction: column;
+}
+.board-scroll { flex: 1; overflow: auto; -webkit-overflow-scrolling: touch; padding: 8px; }
+.board-canvas {
+  position: relative; margin: 0 auto; background: #fff;
+  border-radius: 6px; box-shadow: 0 2px 12px rgba(0, 0, 0, 0.35);
+  background-image: radial-gradient(circle, #d9dfe6 1px, transparent 1px);
+  background-size: 24px 24px;
+}
+
 .selmenu {
   position: fixed; z-index: 70; transform: translateX(-50%);
   display: flex; gap: 2px; padding: 4px;

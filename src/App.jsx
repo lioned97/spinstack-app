@@ -295,6 +295,7 @@ export default function App() {
   const [affinity, setAffinity] = useState(() => sGet("ss2_affinity", { topics: {}, authors: {} }));
   const [analyses, setAnalyses] = useState(() => sGet("ss2_analyses", {}));
   const [annots, setAnnots] = useState(() => sGet("ss2_annot", {}));
+  const [ink, setInk] = useState(() => sGet("ss2_ink", {})); // {paperId: [strokes]}
   const [readingPaper, setReadingPaper] = useState(null); // {paper, url}
   const [chats, setChats] = useState(() => sGet("ss2_chats", {})); // {paperId: [{role, text, at}]}
   const [chatFor, setChatFor] = useState(null); // {paper, selection?, questions?: []}
@@ -789,6 +790,12 @@ export default function App() {
     const na = { ...annots, [paperId]: list.slice(-300) };
     setAnnots(na);
     persist("ss2_annot", na);
+  }
+
+  function saveInkFor(paperId, list) {
+    const ni = { ...ink, [paperId]: list.slice(-300) };
+    setInk(ni);
+    persist("ss2_ink", ni);
   }
 
   // resolution order: paper.pdf → arXiv id → Unpaywall (needs email) → none
@@ -1624,6 +1631,8 @@ export default function App() {
             url={readingPaper.url}
             annots={annots[readingPaper.paper.id] || []}
             onSave={(list) => saveAnnotsFor(readingPaper.paper.id, list)}
+            ink={ink[readingPaper.paper.id] || []}
+            onSaveInk={(list) => saveInkFor(readingPaper.paper.id, list)}
             onClose={() => setReadingPaper(null)}
             onAction={(mode, { selection }) => handlePaperAI(mode, readingPaper.paper, selection)}
             showToast={showToast}

@@ -7,7 +7,7 @@
 // Virtualized: only the current page ±2 get a canvas + text layer.
 // ─────────────────────────────────────────────────────────────
 import React, { useEffect, useRef, useState } from "react";
-import { X, ZoomIn, ZoomOut } from "lucide-react";
+import { X, ZoomIn, ZoomOut, PenLine, Eraser, Presentation, Trash2 } from "lucide-react";
 import * as pdfjsLib from "pdfjs-dist";
 import workerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 
@@ -16,6 +16,108 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = workerUrl;
 const nowISO = () => new Date().toISOString();
 const newId = () =>
   (crypto.randomUUID && crypto.randomUUID()) || `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+
+// ink palette — dark strokes that read on white pages AND the whiteboard
+const INK_COLORS = ["#d8423f", "#0c8d80", "#16202b"];
+const BOARD_W = 1000; // whiteboard virtual coordinate space
+const BOARD_H = 1400;
+
+// ── freehand ink canvas (shared by PDF pages and the whiteboard) ──
+// Strokes are stored in scale-1 coordinates: {id, page, color, w, pts, at}.
+function InkLayer({ strokes, scale, tool, color, onCommit, onErase, width, height }) {
+  const canvasRef = useRef(null);
+  const drawing = useRef(null);
+
+  function drawStroke(ctx, pts, strokeColor, w) {
+    if (!pts || pts.length === 0) return;
+    ctx.strokeStyle = strokeColor;
+    ctx.lineWidth = w;
+    ctx.beginPath();
+    ctx.moveTo(pts[0][0] * scale, pts[0][1] * scale);
+    for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0] * scale, pts[i][1] * scale);
+    if (pts.length === 1) ctx.lineTo(pts[0][0] * scale + 0.1, pts[0][1] * scale);
+    ctx.stroke();
+  }
+
+  function redraw(extra) {
+    const c = canvasRef.current;
+    if (!c || !width || !height) return;
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const W = Math.floor(width * dpr);
+    if (c.width !== W) {
+      c.width = W;
+      c.height = Math.floor(height * dpr);
+    }
+    const ctx = c.getContext("2d");
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, width, height);
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+    for (const s of strokes) drawStroke(ctx, s.pts, s.color, (s.w || 2) * scale);
+    if (extra) drawStroke(ctx, extra.pts, extra.color, extra.w * scale);
+  }
+
+  useEffect(redraw, [strokes, scale, width, height]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const pos = (e) => {
+    const r = canvasRef.current.getBoundingClientRect();
+    return [(e.clientX - r.left) / scale, (e.clientY - r.top) / scale];
+  };
+
+  function eraseAt(p) {
+    const tol = 9 / scale;
+    const hit = strokes.find((s) =>
+      (s.pts || []).some(([x, y]) => Math.hypot(x - p[0], y - p[1]) < tol)
+    );
+    if (hit) onErase(hit.id);
+  }
+
+  function down(e) {
+    if (!tool) return;
+    e.preventDefault();
+    canvasRef.current.setPointerCapture(e.pointerId);
+    if (tool === "eraser") {
+      drawing.current = { erasing: true };
+      eraseAt(pos(e));
+      return;
+    }
+    drawing.current = { pts: [pos(e)], color, w: 2 };
+  }
+  function move(e) {
+    const d = drawing.current;
+    if (!d) return;
+    if (d.erasing) return eraseAt(pos(e));
+    const p = pos(e);
+    const last = d.pts[d.pts.length - 1];
+    if (Math.hypot((p[0] - last[0]) * scale, (p[1] - last[1]) * scale) > 2) {
+      d.pts.push(p);
+      redraw(d);
+    }
+  }
+  function up() {
+    const d = drawing.current;
+    drawing.current = null;
+    if (d && !d.erasing && d.pts.length > 0) {
+      onCommit({
+        pts: d.pts.map(([x, y]) => [Math.round(x * 100) / 100, Math.round(y * 100) / 100]),
+        color: d.color,
+        w: d.w,
+      });
+    }
+  }
+
+  return (
+    <canvas
+      ref={canvasRef}
+      className={`ink-layer${tool ? " active" : ""}`}
+      style={{ width, height }}
+      onPointerDown={down}
+      onPointerMove={move}
+      onPointerUp={up}
+      onPointerCancel={up}
+    />
+  );
+}
 
 // Walk a text layer's text nodes → concatenated string + node offsets.
 function walkText(container) {
@@ -88,7 +190,7 @@ function quoteContext(textLayerEl, range) {
   };
 }
 
-function PageView({ pdf, num, scale, active, pageW, pageH, annots, onHighlightTap }) {
+function PageView({ pdf, num, scale, active, pageW, pageH, annots, onHighlightTap, ink, tool, color, onInkCommit, onInkErase }) {
   const wrapRef = useRef(null);
   const canvasRef = useRef(null);
   const textRef = useRef(null);
@@ -196,13 +298,23 @@ function PageView({ pdf, num, scale, active, pageW, pageH, annots, onHighlightTa
           <canvas ref={canvasRef} />
           <div ref={hlRef} className="hl-layer" />
           <div ref={textRef} className="pdf-textlayer" data-page={num} />
+          <InkLayer
+            strokes={ink}
+            scale={scale}
+            tool={tool}
+            color={color}
+            width={pageW}
+            height={pageH}
+            onCommit={(s) => onInkCommit(num, s)}
+            onErase={onInkErase}
+          />
         </>
       )}
     </div>
   );
 }
 
-export default function Reader({ paper, url, annots, onSave, onClose, onAction, showToast }) {
+export default function Reader({ paper, url, annots, onSave, ink, onSaveInk, onClose, onAction, showToast }) {
   const [pdf, setPdf] = useState(null);
   const [numPages, setNumPages] = useState(0);
   const [base, setBase] = useState(null); // page size at scale 1
@@ -210,8 +322,31 @@ export default function Reader({ paper, url, annots, onSave, onClose, onAction, 
   const [current, setCurrent] = useState(1);
   const [menu, setMenu] = useState(null); // {x, y, page, quote, prefix, suffix}
   const [sheet, setSheet] = useState(null); // {annotId, draft}
+  const [tool, setTool] = useState(null); // null | "pen" | "eraser"
+  const [colorIdx, setColorIdx] = useState(0);
+  const [board, setBoard] = useState(false); // whiteboard overlay
   const scrollRef = useRef(null);
   const live = (annots || []).filter((a) => !a.deleted);
+  const liveInk = (ink || []).filter((s) => !s.deleted);
+  const boardInk = liveInk.filter((s) => s.page === "board");
+
+  function commitStroke(page, s) {
+    onSaveInk([
+      ...(ink || []),
+      { id: newId(), paperId: paper.id, page, ...s, at: nowISO() },
+    ]);
+  }
+  function eraseStroke(id) {
+    // tombstone — the sync merge is a union, deletions must win
+    onSaveInk((ink || []).map((s) => (s.id === id ? { ...s, deleted: true, at: nowISO() } : s)));
+  }
+  function clearBoard() {
+    if (!boardInk.length) return;
+    onSaveInk(
+      (ink || []).map((s) => (s.page === "board" && !s.deleted ? { ...s, deleted: true, at: nowISO() } : s))
+    );
+    showToast("Whiteboard cleared");
+  }
 
   // load document
   useEffect(() => {
@@ -355,6 +490,34 @@ export default function Reader({ paper, url, annots, onSave, onClose, onAction, 
         <span className="reader-pages-lbl">
           {numPages ? `${current} / ${numPages}` : "…"}
         </span>
+        <button
+          onClick={() => setTool(tool === "pen" ? null : "pen")}
+          aria-label="Pen"
+          title="Draw on the page"
+          className={tool === "pen" ? "tool-on" : ""}
+        >
+          <PenLine size={17} color={tool === "pen" ? INK_COLORS[colorIdx] : "var(--dim)"} />
+        </button>
+        {tool === "pen" && (
+          <button
+            onClick={() => setColorIdx((i) => (i + 1) % INK_COLORS.length)}
+            aria-label="Pen color"
+            title="Pen color"
+          >
+            <span className="ink-dot" style={{ background: INK_COLORS[colorIdx] }} />
+          </button>
+        )}
+        <button
+          onClick={() => setTool(tool === "eraser" ? null : "eraser")}
+          aria-label="Eraser"
+          title="Erase strokes"
+          className={tool === "eraser" ? "tool-on" : ""}
+        >
+          <Eraser size={17} color={tool === "eraser" ? "var(--red)" : "var(--dim)"} />
+        </button>
+        <button onClick={() => setBoard(true)} aria-label="Whiteboard" title="Whiteboard">
+          <Presentation size={17} color={boardInk.length ? "var(--teal)" : "var(--dim)"} />
+        </button>
         <button onClick={() => setZoom((z) => Math.max(0.5, +(z - 0.15).toFixed(2)))} aria-label="Zoom out">
           <ZoomOut size={17} color="var(--dim)" />
         </button>
@@ -381,9 +544,25 @@ export default function Reader({ paper, url, annots, onSave, onClose, onAction, 
                 const a = live.find((x) => x.id === id);
                 if (a) setSheet({ annotId: id, draft: a.note || "" });
               }}
+              ink={liveInk.filter((s) => s.page === n)}
+              tool={tool}
+              color={INK_COLORS[colorIdx]}
+              onInkCommit={commitStroke}
+              onInkErase={eraseStroke}
             />
           ))}
       </div>
+
+      {board && (
+        <BoardOverlay
+          paper={paper}
+          strokes={boardInk}
+          onCommit={(s) => commitStroke("board", s)}
+          onErase={eraseStroke}
+          onClear={clearBoard}
+          onClose={() => setBoard(false)}
+        />
+      )}
 
       {menu && (
         <div className="selmenu" style={{ left: menu.x, top: menu.y }}>
@@ -395,7 +574,7 @@ export default function Reader({ paper, url, annots, onSave, onClose, onAction, 
       )}
 
       {sheet && sheetAnnot && (
-        <div className="share-overlay" onClick={() => setSheet(null)}>
+        <div className="share-overlay reader-sheet" onClick={() => setSheet(null)}>
           <div className="share-sheet" onClick={(e) => e.stopPropagation()}>
             <div className="section-h" style={{ margin: "0 0 4px" }}>
               Highlight · p.{sheetAnnot.page}
@@ -423,6 +602,70 @@ export default function Reader({ paper, url, annots, onSave, onClose, onAction, 
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+// ── per-paper whiteboard: a synced scratch canvas (page: "board") ──
+function BoardOverlay({ paper, strokes, onCommit, onErase, onClear, onClose }) {
+  const [tool, setTool] = useState("pen");
+  const [colorIdx, setColorIdx] = useState(0);
+  const wrapRef = useRef(null);
+  const [scale, setScale] = useState(0);
+
+  useEffect(() => {
+    const fit = () =>
+      setScale(Math.max(0.2, ((wrapRef.current?.clientWidth || window.innerWidth) - 16) / BOARD_W));
+    fit();
+    window.addEventListener("resize", fit);
+    return () => window.removeEventListener("resize", fit);
+  }, []);
+
+  return (
+    <div className="board-overlay">
+      <header className="reader-hdr">
+        <button onClick={onClose} aria-label="Close whiteboard">
+          <X size={18} color="var(--dim)" />
+        </button>
+        <span className="reader-title">Whiteboard · {paper.title}</span>
+        <span className="spacer" />
+        <button
+          onClick={() => setTool("pen")}
+          aria-label="Pen"
+          className={tool === "pen" ? "tool-on" : ""}
+        >
+          <PenLine size={17} color={tool === "pen" ? INK_COLORS[colorIdx] : "var(--dim)"} />
+        </button>
+        <button onClick={() => setColorIdx((i) => (i + 1) % INK_COLORS.length)} aria-label="Pen color">
+          <span className="ink-dot" style={{ background: INK_COLORS[colorIdx] }} />
+        </button>
+        <button
+          onClick={() => setTool("eraser")}
+          aria-label="Eraser"
+          className={tool === "eraser" ? "tool-on" : ""}
+        >
+          <Eraser size={17} color={tool === "eraser" ? "var(--red)" : "var(--dim)"} />
+        </button>
+        <button onClick={onClear} aria-label="Clear whiteboard" title="Clear whiteboard">
+          <Trash2 size={17} color="var(--dim)" />
+        </button>
+      </header>
+      <div className="board-scroll" ref={wrapRef}>
+        {scale > 0 && (
+          <div className="board-canvas" style={{ width: BOARD_W * scale, height: BOARD_H * scale }}>
+            <InkLayer
+              strokes={strokes}
+              scale={scale}
+              tool={tool}
+              color={INK_COLORS[colorIdx]}
+              width={BOARD_W * scale}
+              height={BOARD_H * scale}
+              onCommit={onCommit}
+              onErase={onErase}
+            />
+          </div>
+        )}
+      </div>
     </div>
   );
 }

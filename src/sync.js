@@ -34,6 +34,7 @@ export const SYNC_KEYS = [
   "ss2_settings", // {uiMode, harvestUrl, ...}
   "ss2_annot", // {paperId: [{id, page, quote, prefix, suffix, color, note?, deleted?, at}]}
   "ss2_chats", // {paperId: [{role, text, at}]} — paper chat history, capped 60/paper
+  "ss2_ink", // {paperId: [{id, page: n|"board", color, w, pts, deleted?, at}]} — drawings
   "ss2_last_seen", // ISO timestamp — newest harvest the user has seen
   "ss2_swipe_log", // [{id, kept, at}] capped log
 ];
@@ -133,6 +134,21 @@ function mergeSnapshots(local, remote) {
       .slice(-300);
   }
   out.ss2_annot = annot;
+
+  // ink strokes: same scheme as annotations — per-paper union by stroke
+  // id, newer at wins (deletions are tombstones), cap 300 per paper
+  const inkAll = { ...(remote.ss2_ink || {}) };
+  for (const [pid, list] of Object.entries(local.ss2_ink || {})) {
+    const byId = new Map((inkAll[pid] || []).map((s) => [s.id, s]));
+    for (const s of list || []) {
+      const prev = byId.get(s.id);
+      if (!prev || (s.at || "") >= (prev.at || "")) byId.set(s.id, s);
+    }
+    inkAll[pid] = [...byId.values()]
+      .sort((x, y) => (x.at || "").localeCompare(y.at || ""))
+      .slice(-300);
+  }
+  out.ss2_ink = inkAll;
 
   // chats: per-paper union by (at, role), sorted by at, cap 60
   const chats = { ...(remote.ss2_chats || {}) };
