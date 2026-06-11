@@ -26,7 +26,7 @@ const HEADERS = {
 export const SYNC_KEYS = [
   "ss2_saved", // {id: paper} — papers you kept
   "ss2_skipped", // {id: true} — papers you dismissed
-  "ss2_topics", // [{id, name, addedAt}]
+  "ss2_topics", // [{id, name, addedAt, updatedAt?, hidden?}]
   "ss2_affinity", // {topics:{name:weight}, authors:{name:weight}}
   "ss2_analyses", // {paperId: {text, at}} — Claude "why this matters" cache
   "ss2_settings", // {uiMode, harvestUrl, ...}
@@ -77,10 +77,15 @@ function mergeSnapshots(local, remote) {
     if (saved[id]) delete out.ss2_skipped[id];
   }
 
-  // topics: union by lowercase name
+  // topics: union by lowercase name, per-name newest-wins on updatedAt
+  // (preserves hidden flags + renames; missing updatedAt = epoch, so any
+  // edited copy beats an untouched one; ties go to local)
   const topicMap = new Map();
   for (const t of [...(remote.ss2_topics || []), ...(local.ss2_topics || [])]) {
-    if (t && t.name) topicMap.set(t.name.toLowerCase(), t);
+    if (!t || !t.name) continue;
+    const k = t.name.toLowerCase();
+    const prev = topicMap.get(k);
+    if (!prev || (t.updatedAt || "") >= (prev.updatedAt || "")) topicMap.set(k, t);
   }
   out.ss2_topics = [...topicMap.values()];
 

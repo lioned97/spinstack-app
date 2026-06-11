@@ -11,6 +11,10 @@ import {
   X,
   Heart,
   Trash2,
+  Share2,
+  Eye,
+  EyeOff,
+  Pencil,
 } from "lucide-react";
 import { sGet, persist, onSyncStatus } from "./sync.js";
 
@@ -30,9 +34,14 @@ const DEFAULT_TOPICS = [
   "quantum memory",
 ];
 
+const THEME_COLORS = { dark: "#0a0e12", light: "#f4f6f8" };
+
 // ── helpers ────────────────────────────────────────────────
 
 const nowISO = () => new Date().toISOString();
+
+const isDefaultTopic = (name) =>
+  DEFAULT_TOPICS.some((d) => d.toLowerCase() === (name || "").toLowerCase());
 
 // OpenAlex ships abstracts as inverted index — rebuild text.
 function reconstructAbstract(inv) {
@@ -62,6 +71,36 @@ function normalizeOpenAlex(r) {
     venue: r.primary_location?.source?.display_name || "OpenAlex",
     url: r.doi || r.id || "",
     source: "openalex-live",
+    harvestedAt: nowISO(),
+  };
+}
+
+// Semantic Scholar live search — normalized like the harvester:
+// id priority doi > arXiv > s2 paperId.
+function normalizeS2(r) {
+  if (!r) return null;
+  const title = r.title || "";
+  if (!title) return null;
+  const ext = r.externalIds || {};
+  const doi = ext.DOI;
+  const axv = ext.ArXiv;
+  const id = doi
+    ? `doi:${doi.toLowerCase()}`
+    : axv
+      ? `arxiv:${axv}`
+      : `s2:${r.paperId}`;
+  return {
+    id,
+    doi,
+    arxivId: axv,
+    title,
+    abstract: r.abstract || "",
+    authors: (r.authors || []).map((a) => a.name).filter(Boolean),
+    year: r.year,
+    venue: r.venue || (axv ? "arXiv" : "Semantic Scholar"),
+    url: r.openAccessPdf?.url || r.url || "",
+    pdf: r.openAccessPdf?.url,
+    source: "s2-live",
     harvestedAt: nowISO(),
   };
 }
@@ -126,8 +165,8 @@ function OdmrDip({ score }) {
   return (
     <div className="odmr" aria-label={`Relevance ${score.toFixed(2)}`}>
       <svg viewBox="0 0 100 26" preserveAspectRatio="none">
-        <path d={d} stroke="#ff5a57" strokeWidth="1.6" fill="none" vectorEffect="non-scaling-stroke" />
-        <line x1="0" y1={yBase} x2="100" y2={yBase} stroke="#1e2630" strokeWidth="0.5" />
+        <path d={d} stroke="var(--red)" strokeWidth="1.6" fill="none" vectorEffect="non-scaling-stroke" />
+        <line x1="0" y1={yBase} x2="100" y2={yBase} stroke="var(--line)" strokeWidth="0.5" />
       </svg>
       <div className="lbl">
         RELEVANCE <b>{score.toFixed(2)}</b>
@@ -150,7 +189,7 @@ export default function App() {
   const [affinity, setAffinity] = useState(() => sGet("ss2_affinity", { topics: {}, authors: {} }));
   const [analyses, setAnalyses] = useState(() => sGet("ss2_analyses", {}));
   const [settings, setSettings] = useState(() =>
-    sGet("ss2_settings", { uiMode: "feed", harvestUrl: HARVEST_URL, updatedAt: nowISO() })
+    sGet("ss2_settings", { uiMode: "feed", harvestUrl: HARVEST_URL, theme: "auto", updatedAt: nowISO() })
   );
   const [lastSeen, setLastSeen] = useState(() => sGet("ss2_last_seen", ""));
 
@@ -158,9 +197,13 @@ export default function App() {
   const [toast, setToast] = useState("");
   const [syncStatus, setSyncStatus] = useState("syncing");
   const [loadingFeed, setLoadingFeed] = useState(false);
+  const [rerunning, setRerunning] = useState(false);
   const [analyzingId, setAnalyzingId] = useState(null);
   const [expanded, setExpanded] = useState({});
   const [newTopic, setNewTopic] = useState("");
+  const [editingTopicId, setEditingTopicId] = useState(null);
+  const [editName, setEditName] = useState("");
+  const [sharePaper, setSharePaper] = useState(null);
   const [deckIndex, setDeckIndex] = useState(0);
   const [drag, setDrag] = useState({ x: 0, active: false });
   const dragStart = useRef(0);
@@ -172,6 +215,28 @@ export default function App() {
     clearTimeout(showToast.t);
     showToast.t = setTimeout(() => setToast(""), 2500);
   };
+
+  function updateSettings(patch) {
+    const ns = { ...settings, ...patch, updatedAt: nowISO() };
+    setSettings(ns);
+    persist("ss2_settings", ns);
+  }
+
+  // ── theme: auto / dark / light ──
+  const theme = settings.theme || "auto";
+  useEffect(() => {
+    const mq = window.matchMedia("(prefers-color-scheme: light)");
+    const apply = () => {
+      const eff = theme === "auto" ? (mq.matches ? "light" : "dark") : theme;
+      document.documentElement.dataset.theme = eff;
+      document
+        .querySelector('meta[name="theme-color"]')
+        ?.setAttribute("content", THEME_COLORS[eff] || THEME_COLORS.dark);
+    };
+    apply();
+    mq.addEventListener("change", apply);
+    return () => mq.removeEventListener("change", apply);
+  }, [theme]);
 
   // ── feed loading ──
   async function loadFeed(showStatus = true) {
@@ -199,13 +264,103 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // ── re-run search: live OpenAlex + Semantic Scholar per visible topic,
+  // plus a harvest feed refresh, merged into the pool in one pass ──
+  async function rerunSearch() {
+    if (rerunning) return;
+    setRerunning(true);
+    showToast("Re-running search…");
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    try {
+      const fresh = [];
+      for (const t of topics.filter((x) => !x.hidden)) {
+        try {
+          const res = await fetch(
+            `https://api.openalex.org/works?filter=title_and_abstract.search:${encodeURIComponent(
+              t.name
+            )}&per_page=12&sort=publication_year:desc`
+          );
+          if (res.ok) {
+            const data = await res.json();
+            fresh.push(...(data.results || []).map(normalizeOpenAlex).filter(qualityFilter));
+          }
+        } catch {}
+        await sleep(300);
+        try {
+          const res = await fetch(
+            `https://api.semanticscholar.org/graph/v1/paper/search?query=${encodeURIComponent(
+              t.name
+            )}&limit=8&fields=title,abstract,year,venue,authors,externalIds,url,openAccessPdf`
+          );
+          if (res.ok) {
+            const data = await res.json();
+            fresh.push(...(data.data || []).map(normalizeS2).filter(qualityFilter));
+          }
+        } catch {}
+        await sleep(300);
+      }
+      // re-fetch the harvest feed too
+      try {
+        const res = await fetch(settings.harvestUrl || HARVEST_URL);
+        if (res.ok) {
+          const raw = await res.json();
+          fresh.push(...(Array.isArray(raw) ? raw : raw.papers || []).filter(qualityFilter));
+        }
+      } catch {}
+
+      const before = new Set(pool.map((p) => p.id));
+      const byId = new Map();
+      for (const p of [...pool, ...fresh]) if (p?.id && !byId.has(p.id)) byId.set(p.id, p);
+      const merged = [...byId.values()];
+      const added = merged.length - before.size;
+      setPool(merged);
+      localStorage.setItem("ss2_pool", JSON.stringify(merged));
+      showToast(added > 0 ? `${added} new papers found` : "No new papers found");
+    } catch {
+      showToast("Re-run failed — check connection");
+    } finally {
+      setRerunning(false);
+    }
+  }
+
   // ── derived ──
+  const visibleTopics = useMemo(() => topics.filter((t) => !t.hidden), [topics]);
+
   const triage = useMemo(() => {
     const list = pool.filter((p) => !saved[p.id] && !skipped[p.id]);
     return list
-      .map((p) => ({ ...p, _score: scoreCard(p, topics, affinity) }))
+      .map((p) => ({ ...p, _score: scoreCard(p, visibleTopics, affinity) }))
       .sort((a, b) => b._score - a._score);
-  }, [pool, saved, skipped, topics, affinity]);
+  }, [pool, saved, skipped, visibleTopics, affinity]);
+
+  // topic filter (A5): empty selection = ALL; stale/hidden names drop out
+  const feedFilter = useMemo(() => {
+    const names = new Set(visibleTopics.map((t) => t.name.toLowerCase()));
+    return (settings.feedFilter || []).filter((n) => names.has(n.toLowerCase()));
+  }, [settings.feedFilter, visibleTopics]);
+
+  const filteredTriage = useMemo(() => {
+    if (feedFilter.length === 0) return triage;
+    const wanted = feedFilter.map((n) => n.toLowerCase());
+    return triage.filter((p) => {
+      const text = `${p.title} ${p.abstract || ""}`.toLowerCase();
+      return wanted.some((n) => text.includes(n));
+    });
+  }, [triage, feedFilter]);
+
+  // feed sort (A3): deck always uses relevance (filteredTriage order)
+  const sortMode = settings.sortMode || "relevance";
+  const feedList = useMemo(() => {
+    if (sortMode === "newest")
+      return [...filteredTriage].sort((a, b) =>
+        (b.harvestedAt || "").localeCompare(a.harvestedAt || "")
+      );
+    if (sortMode === "year")
+      return [...filteredTriage].sort(
+        (a, b) => ((b.year || 0) - (a.year || 0)) || (b._score - a._score)
+      );
+    return filteredTriage;
+  }, [filteredTriage, sortMode]);
 
   const newCount = useMemo(
     () => triage.filter((p) => (p.harvestedAt || "") > (lastSeen || "")).length,
@@ -221,8 +376,8 @@ export default function App() {
 
   // clamp deck index
   useEffect(() => {
-    if (deckIndex >= triage.length) setDeckIndex(0);
-  }, [triage.length, deckIndex]);
+    if (deckIndex >= filteredTriage.length) setDeckIndex(0);
+  }, [filteredTriage.length, deckIndex]);
 
   // ── swipe verdicts ──
   function verdict(paper, kept) {
@@ -233,7 +388,7 @@ export default function App() {
     };
     const delta = kept ? 0.35 : -0.2;
     const text = `${paper.title} ${paper.abstract || ""}`.toLowerCase();
-    for (const t of topics) {
+    for (const t of visibleTopics) {
       const k = t.name.toLowerCase();
       if (text.includes(k)) next.topics[k] = +((next.topics[k] || 0) + delta).toFixed(3);
     }
@@ -269,7 +424,7 @@ export default function App() {
   useEffect(() => {
     if (tab !== "stack" || settings.uiMode !== "swipe") return;
     const fn = (e) => {
-      const p = triage[deckIndex];
+      const p = filteredTriage[deckIndex];
       if (!p) return;
       if (e.key === "ArrowRight") verdict(p, true);
       if (e.key === "ArrowLeft") verdict(p, false);
@@ -277,7 +432,7 @@ export default function App() {
     window.addEventListener("keydown", fn);
     return () => window.removeEventListener("keydown", fn);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tab, settings.uiMode, triage, deckIndex, affinity, topics, saved, skipped]);
+  }, [tab, settings.uiMode, filteredTriage, deckIndex, affinity, topics, saved, skipped]);
 
   // ── touch drag (swipe mode) ──
   const onTouchStart = (e) => {
@@ -289,7 +444,7 @@ export default function App() {
     setDrag({ x: e.touches[0].clientX - dragStart.current, active: true });
   };
   const onTouchEnd = () => {
-    const p = triage[deckIndex];
+    const p = filteredTriage[deckIndex];
     if (p && Math.abs(drag.x) > 80) verdict(p, drag.x > 0);
     setDrag({ x: 0, active: false });
   };
@@ -303,7 +458,7 @@ export default function App() {
       setNewTopic("");
       return showToast("Topic already tracked");
     }
-    const nt = [...topics, { id: `${Date.now()}`, name, addedAt: nowISO() }];
+    const nt = [...topics, { id: `${Date.now()}`, name, addedAt: nowISO(), updatedAt: nowISO() }];
     setTopics(nt);
     persist("ss2_topics", nt);
     setNewTopic("");
@@ -332,6 +487,93 @@ export default function App() {
     const nt = topics.filter((t) => t.id !== id);
     setTopics(nt);
     persist("ss2_topics", nt);
+  }
+
+  function updateTopic(id, patch) {
+    const nt = topics.map((t) => (t.id === id ? { ...t, ...patch, updatedAt: nowISO() } : t));
+    setTopics(nt);
+    persist("ss2_topics", nt);
+  }
+
+  function toggleHidden(t) {
+    updateTopic(t.id, { hidden: !t.hidden });
+    showToast(t.hidden ? `“${t.name}” visible again` : `“${t.name}” hidden from feed`);
+  }
+
+  function startRename(t) {
+    setEditingTopicId(t.id);
+    setEditName(t.name);
+  }
+
+  function submitRename(e) {
+    e.preventDefault();
+    const name = editName.trim();
+    if (!name) return;
+    if (
+      topics.some((t) => t.id !== editingTopicId && t.name.toLowerCase() === name.toLowerCase())
+    ) {
+      return showToast("Topic already exists");
+    }
+    updateTopic(editingTopicId, { name });
+    setEditingTopicId(null);
+    showToast("Topic renamed");
+  }
+
+  function restoreDefaults() {
+    const have = new Set(topics.map((t) => t.name.toLowerCase()));
+    const missing = DEFAULT_TOPICS.filter((d) => !have.has(d.toLowerCase()));
+    if (missing.length === 0) return showToast("All default topics present");
+    const nt = [
+      ...topics,
+      ...missing.map((name, i) => ({
+        id: `${Date.now()}-${i}`,
+        name,
+        addedAt: nowISO(),
+        updatedAt: nowISO(),
+      })),
+    ];
+    setTopics(nt);
+    persist("ss2_topics", nt);
+    showToast(`Restored ${missing.length} default topic${missing.length > 1 ? "s" : ""}`);
+  }
+
+  function toggleFeedFilter(name) {
+    const cur = settings.feedFilter || [];
+    const has = cur.some((n) => n.toLowerCase() === name.toLowerCase());
+    updateSettings({
+      feedFilter: has ? cur.filter((n) => n.toLowerCase() !== name.toLowerCase()) : [...cur, name],
+    });
+  }
+
+  // ── share ──
+  function buildShareText(p) {
+    const list = p.authors || [];
+    const authors = list.slice(0, 3).join(", ") + (list.length > 3 ? " et al." : "");
+    return `${p.title} — ${authors} · ${p.year}${p.summary ? `\n${p.summary}` : ""}`;
+  }
+
+  async function share(p) {
+    const text = buildShareText(p);
+    if (navigator.share) {
+      try {
+        await navigator.share({ title: p.title, text, url: p.url || undefined });
+        return;
+      } catch (err) {
+        if (err.name === "AbortError") return; // user closed the native sheet
+      }
+    }
+    setSharePaper(p);
+  }
+
+  async function copyShareLink() {
+    if (!sharePaper) return;
+    try {
+      await navigator.clipboard.writeText(sharePaper.url || buildShareText(sharePaper));
+      showToast("Link copied");
+    } catch {
+      showToast("Copy failed");
+    }
+    setSharePaper(null);
   }
 
   // ── analyze (Claude via /api) ──
@@ -367,7 +609,7 @@ export default function App() {
       persist("ss2_analyses", na);
       setExpanded((x) => ({ ...x, [paper.id]: true }));
     } catch (err) {
-      showToast(`Analysis failed: ${err.message}`.slice(0, 60));
+      showToast(`Analysis failed: ${err.message}`.slice(0, 120));
     } finally {
       setAnalyzingId(null);
     }
@@ -377,12 +619,6 @@ export default function App() {
     const iso = nowISO();
     setLastSeen(iso);
     persist("ss2_last_seen", iso);
-  }
-
-  function setUiMode(uiMode) {
-    const ns = { ...settings, uiMode, updatedAt: nowISO() };
-    setSettings(ns);
-    persist("ss2_settings", ns);
   }
 
   // ── card renderer (shared by feed + deck) ──
@@ -396,7 +632,7 @@ export default function App() {
           <span className="src">{p.source || p.venue || "paper"}</span>
           <span>{p.year}</span>
           {p.venue && <span>· {String(p.venue).slice(0, 36)}</span>}
-          {isNew && <span style={{ color: "#ff5a57" }}>· NEW</span>}
+          {isNew && <span style={{ color: "var(--red)" }}>· NEW</span>}
         </div>
         <h2>{p.title}</h2>
         <div className="authors">
@@ -418,7 +654,7 @@ export default function App() {
             ))}
           </div>
         )}
-        <OdmrDip score={p._score ?? scoreCard(p, topics, affinity)} />
+        <OdmrDip score={p._score ?? scoreCard(p, visibleTopics, affinity)} />
         {an && open && (
           <div className="analysis">
             <span className="tag">Why this matters · Claude</span>
@@ -450,6 +686,9 @@ export default function App() {
               More
             </button>
           )}
+          <button className="btn ghost" onClick={() => share(p)} title="Share" aria-label="Share">
+            <Share2 size={15} style={{ verticalAlign: "-3px" }} />
+          </button>
           {p.url && (
             <a className="btn ghost" href={p.url} target="_blank" rel="noreferrer" title="Open paper">
               <ExternalLink size={15} style={{ verticalAlign: "-3px" }} />
@@ -461,50 +700,102 @@ export default function App() {
   }
 
   // ── views ──
-  const deckPaper = triage[deckIndex];
+  const deckPaper = filteredTriage[deckIndex];
+
+  const rerunButton = (
+    <button
+      className="btn ghost"
+      style={{ border: "1px solid var(--line)" }}
+      disabled={rerunning}
+      onClick={rerunSearch}
+    >
+      <RefreshCw
+        size={14}
+        style={{ verticalAlign: "-2px" }}
+        className={rerunning ? "spin" : ""}
+      />{" "}
+      {rerunning ? "Searching…" : "Re-run search"}
+    </button>
+  );
 
   return (
     <div className="app">
       <header className="hdr">
         <h1>SpinStack</h1>
         <span className="readout">
-          {tab} · {triage.length} queued
+          {tab} · {filteredTriage.length} queued
         </span>
         {newCount > 0 && <span className="badge">{newCount} new</span>}
         <span className="spacer" />
         {tab === "stack" && (
           <div className="mode" role="tablist" aria-label="View mode">
-            <button className={settings.uiMode === "feed" ? "on" : ""} onClick={() => setUiMode("feed")}>
+            <button className={settings.uiMode === "feed" ? "on" : ""} onClick={() => updateSettings({ uiMode: "feed" })}>
               FEED
             </button>
-            <button className={settings.uiMode === "swipe" ? "on" : ""} onClick={() => setUiMode("swipe")}>
+            <button className={settings.uiMode === "swipe" ? "on" : ""} onClick={() => updateSettings({ uiMode: "swipe" })}>
               SWIPE
             </button>
           </div>
         )}
         <button onClick={() => loadFeed(true)} title="Refresh feed" aria-label="Refresh feed">
-          <RefreshCw size={16} color={loadingFeed ? "#4dd8c7" : "#8a97a6"} className={loadingFeed ? "spin" : ""} />
+          <RefreshCw size={16} color={loadingFeed ? "var(--teal)" : "var(--dim)"} className={loadingFeed ? "spin" : ""} />
         </button>
         <span className={`sync-dot ${syncStatus}`} title={`Sync: ${syncStatus}`} />
       </header>
 
       {tab === "stack" && newCount > 0 && (
         <div className="deck-meta">
-          <button onClick={markAllSeen} style={{ color: "#4dd8c7" }}>
+          <button onClick={markAllSeen} style={{ color: "var(--teal)" }}>
             mark all seen
           </button>
         </div>
       )}
 
+      {tab === "stack" && visibleTopics.length > 0 && (
+        <div className="chiprow" role="group" aria-label="Filter by topic">
+          <button
+            className={`chip${feedFilter.length === 0 ? " on" : ""}`}
+            onClick={() => updateSettings({ feedFilter: [] })}
+          >
+            ALL
+          </button>
+          {visibleTopics.map((t) => (
+            <button
+              key={t.id}
+              className={`chip${feedFilter.some((n) => n.toLowerCase() === t.name.toLowerCase()) ? " on" : ""}`}
+              onClick={() => toggleFeedFilter(t.name)}
+            >
+              {t.name}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {tab === "stack" && settings.uiMode === "feed" && (
+        <div className="chiprow" role="group" aria-label="Sort feed">
+          {["relevance", "newest", "year"].map((m) => (
+            <button
+              key={m}
+              className={`chip${sortMode === m ? " on" : ""}`}
+              onClick={() => updateSettings({ sortMode: m })}
+            >
+              {m.toUpperCase()}
+            </button>
+          ))}
+        </div>
+      )}
+
       {tab === "stack" && settings.uiMode === "feed" && (
         <main>
-          {triage.length === 0 ? (
+          {feedList.length === 0 ? (
             <div className="empty">
               <div className="big">Queue clear</div>
-              The harvester runs daily at 06:00 UTC. Tap ↻ to refresh, or add a topic to fetch papers now.
+              The harvester runs daily at 06:00 UTC. Tap ↻ to refresh, or re-run the search across
+              your topics now.
+              <div style={{ marginTop: 16 }}>{rerunButton}</div>
             </div>
           ) : (
-            triage.slice(0, 60).map((p) => <PaperCard key={p.id} p={p} />)
+            feedList.slice(0, 60).map((p) => <PaperCard key={p.id} p={p} />)
           )}
         </main>
       )}
@@ -515,11 +806,12 @@ export default function App() {
             <div className="empty">
               <div className="big">Queue clear</div>
               Swipe right to save, left to skip. New papers land daily.
+              <div style={{ marginTop: 16 }}>{rerunButton}</div>
             </div>
           ) : (
             <>
               <div className="deck-meta">
-                {deckIndex + 1} / {triage.length} · → save · ← skip
+                {deckIndex + 1} / {filteredTriage.length} · → save · ← skip
               </div>
               <div
                 onTouchStart={onTouchStart}
@@ -584,15 +876,18 @@ export default function App() {
                     title="Why this matters"
                     aria-label="Analyze"
                   >
-                    <Sparkles size={16} color={analyzingId === p.id ? "#4dd8c7" : "#8a97a6"} />
+                    <Sparkles size={16} color={analyzingId === p.id ? "var(--teal)" : "var(--dim)"} />
+                  </button>
+                  <button onClick={() => share(p)} title="Share" aria-label="Share">
+                    <Share2 size={16} color="var(--dim)" />
                   </button>
                   {p.url && (
                     <a href={p.url} target="_blank" rel="noreferrer" aria-label="Open paper">
-                      <ExternalLink size={16} color="#8a97a6" />
+                      <ExternalLink size={16} color="var(--dim)" />
                     </a>
                   )}
                   <button onClick={() => unsave(p.id)} title="Remove" aria-label="Remove">
-                    <Trash2 size={16} color="#8a97a6" />
+                    <Trash2 size={16} color="var(--dim)" />
                   </button>
                 </div>
               ))
@@ -615,40 +910,94 @@ export default function App() {
           </form>
           <p className="hint">
             New topics fetch papers immediately from OpenAlex and join the daily harvest from
-            tomorrow.
+            tomorrow. Hidden topics (eye toggle) stay harvested but leave your feed.
           </p>
           <div className="section-h">Tracked topics</div>
           {topics.map((t) => (
-            <div className="row" key={t.id}>
-              <Hash size={14} color="#4dd8c7" />
+            <div className="row" key={t.id} style={t.hidden ? { opacity: 0.55 } : undefined}>
+              <Hash size={14} color="var(--teal)" />
               <div className="grow">
-                <div className="title">{t.name}</div>
-                {affinity.topics?.[t.name.toLowerCase()] !== undefined && (
-                  <div className="sub">
-                    learned weight {affinity.topics[t.name.toLowerCase()].toFixed(2)}
-                  </div>
+                {editingTopicId === t.id ? (
+                  <form onSubmit={submitRename} style={{ display: "flex", gap: 8 }}>
+                    <input
+                      className="input"
+                      value={editName}
+                      onChange={(e) => setEditName(e.target.value)}
+                      autoFocus
+                      onKeyDown={(e) => e.key === "Escape" && setEditingTopicId(null)}
+                    />
+                    <button
+                      className="btn ghost"
+                      type="submit"
+                      style={{ border: "1px solid var(--line)" }}
+                    >
+                      Save
+                    </button>
+                  </form>
+                ) : (
+                  <>
+                    <div className="title">
+                      {t.name}
+                      {isDefaultTopic(t.name) && <span className="chip default">DEFAULT</span>}
+                    </div>
+                    {affinity.topics?.[t.name.toLowerCase()] !== undefined && (
+                      <div className="sub">
+                        learned weight {affinity.topics[t.name.toLowerCase()].toFixed(2)}
+                      </div>
+                    )}
+                  </>
                 )}
               </div>
+              <button onClick={() => startRename(t)} title="Rename" aria-label={`Rename ${t.name}`}>
+                <Pencil size={15} color="var(--dim)" />
+              </button>
+              <button
+                onClick={() => toggleHidden(t)}
+                title={t.hidden ? "Show in feed" : "Hide from feed"}
+                aria-label={`${t.hidden ? "Show" : "Hide"} ${t.name}`}
+              >
+                {t.hidden ? <EyeOff size={15} color="var(--dim)" /> : <Eye size={15} color="var(--teal)" />}
+              </button>
               <button onClick={() => removeTopic(t.id)} aria-label={`Remove ${t.name}`}>
-                <Trash2 size={15} color="#8a97a6" />
+                <Trash2 size={15} color="var(--dim)" />
               </button>
             </div>
           ))}
+          <div className="field" style={{ marginTop: 20 }}>
+            <button
+              className="btn ghost"
+              style={{ border: "1px solid var(--line)" }}
+              onClick={restoreDefaults}
+            >
+              Restore default topics
+            </button>
+          </div>
         </main>
       )}
 
       {tab === "settings" && (
         <main>
           <div className="field">
+            <label>Theme</label>
+            <div className="mode" role="radiogroup" aria-label="Theme">
+              {["auto", "dark", "light"].map((m) => (
+                <button
+                  key={m}
+                  className={theme === m ? "on" : ""}
+                  onClick={() => updateSettings({ theme: m })}
+                >
+                  {m.toUpperCase()}
+                </button>
+              ))}
+            </div>
+            <p className="hint">Auto follows your system’s light/dark preference.</p>
+          </div>
+          <div className="field">
             <label>Harvest feed URL</label>
             <input
               className="input"
               value={settings.harvestUrl}
-              onChange={(e) => {
-                const ns = { ...settings, harvestUrl: e.target.value, updatedAt: nowISO() };
-                setSettings(ns);
-                persist("ss2_settings", ns);
-              }}
+              onChange={(e) => updateSettings({ harvestUrl: e.target.value })}
             />
             <p className="hint">Daily harvest output (papers/latest.json on GitHub).</p>
           </div>
@@ -656,31 +1005,34 @@ export default function App() {
             <label>Sync</label>
             <p className="hint">
               All devices share one database row — no login. Status:{" "}
-              <span style={{ color: "#4dd8c7" }}>{syncStatus}</span>. Saves, skips, topics,
+              <span style={{ color: "var(--teal)" }}>{syncStatus}</span>. Saves, skips, topics,
               analyses and settings sync automatically; offline changes push when you reconnect.
             </p>
           </div>
           <div className="field">
             <label>Maintenance</label>
-            <button
-              className="btn ghost"
-              style={{ border: "1px solid var(--line)", marginRight: 8 }}
-              onClick={markAllSeen}
-            >
-              Mark all papers seen
-            </button>
-            <button
-              className="btn ghost"
-              style={{ border: "1px solid var(--line)" }}
-              onClick={() => {
-                const nk = {};
-                setSkipped(nk);
-                persist("ss2_skipped", nk);
-                showToast("Skip history cleared");
-              }}
-            >
-              Clear skip history
-            </button>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+              {rerunButton}
+              <button
+                className="btn ghost"
+                style={{ border: "1px solid var(--line)" }}
+                onClick={markAllSeen}
+              >
+                Mark all papers seen
+              </button>
+              <button
+                className="btn ghost"
+                style={{ border: "1px solid var(--line)" }}
+                onClick={() => {
+                  const nk = {};
+                  setSkipped(nk);
+                  persist("ss2_skipped", nk);
+                  showToast("Skip history cleared");
+                }}
+              >
+                Clear skip history
+              </button>
+            </div>
           </div>
           <div className="field">
             <label>About</label>
@@ -711,6 +1063,42 @@ export default function App() {
           SETUP
         </button>
       </nav>
+
+      {sharePaper && (
+        <div className="share-overlay" onClick={() => setSharePaper(null)}>
+          <div className="share-sheet" onClick={(e) => e.stopPropagation()}>
+            <div className="section-h" style={{ margin: "0 0 4px" }}>
+              Share paper
+            </div>
+            <a
+              className="btn ghost"
+              href={`https://wa.me/?text=${encodeURIComponent(
+                buildShareText(sharePaper) + (sharePaper.url ? `\n${sharePaper.url}` : "")
+              )}`}
+              target="_blank"
+              rel="noreferrer"
+              onClick={() => setSharePaper(null)}
+            >
+              WhatsApp
+            </a>
+            <a
+              className="btn ghost"
+              href={`mailto:?subject=${encodeURIComponent(sharePaper.title)}&body=${encodeURIComponent(
+                buildShareText(sharePaper) + (sharePaper.url ? `\n${sharePaper.url}` : "")
+              )}`}
+              onClick={() => setSharePaper(null)}
+            >
+              Email
+            </a>
+            <button className="btn ghost" onClick={copyShareLink}>
+              Copy link
+            </button>
+            <button className="btn skip" onClick={() => setSharePaper(null)}>
+              Close
+            </button>
+          </div>
+        </div>
+      )}
 
       {toast && <div className="toast">{toast}</div>}
     </div>

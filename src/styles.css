@@ -19,8 +19,28 @@
   --dim: #8a97a6;
   --red: #ff5a57;
   --teal: #4dd8c7;
+  --teal-bg: rgba(77, 216, 199, 0.08);
+  --teal-border: rgba(77, 216, 199, 0.35);
+  --red-border: rgba(255, 90, 87, 0.5);
+  --tabs-bg: rgba(10, 14, 18, 0.92);
   --mono: ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Code", Menlo, Consolas, monospace;
   --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+/* light instrument panel — same variables, set by data-theme on <html> */
+:root[data-theme="light"] {
+  --bg: #f4f6f8;
+  --panel: #ffffff;
+  --panel-2: #eef1f4;
+  --line: #d9dfe6;
+  --ink: #16202b;
+  --dim: #5b6878;
+  --red: #d8423f;
+  --teal: #0c8d80;
+  --teal-bg: rgba(12, 141, 128, 0.08);
+  --teal-border: rgba(12, 141, 128, 0.45);
+  --red-border: rgba(216, 66, 63, 0.55);
+  --tabs-bg: rgba(244, 246, 248, 0.92);
 }
 
 html, body, #root { height: 100%; }
@@ -70,7 +90,7 @@ a:hover { text-decoration: underline; }
   position: fixed; bottom: 0; left: 0; right: 0; z-index: 30;
   display: flex; justify-content: center; gap: 4px;
   padding: 8px 10px calc(8px + env(safe-area-inset-bottom));
-  background: rgba(10, 14, 18, 0.92);
+  background: var(--tabs-bg);
   backdrop-filter: blur(10px);
   border-top: 1px solid var(--line);
 }
@@ -80,7 +100,7 @@ a:hover { text-decoration: underline; }
   color: var(--dim); font-size: 11px; font-family: var(--mono);
   letter-spacing: 0.04em;
 }
-.tabs button.on { color: var(--teal); background: rgba(77, 216, 199, 0.08); }
+.tabs button.on { color: var(--teal); background: var(--teal-bg); }
 .tabs button .nbadge {
   position: absolute; transform: translate(16px, -4px);
   background: var(--red); color: #fff; border-radius: 999px;
@@ -113,7 +133,23 @@ a:hover { text-decoration: underline; }
   border: 1px solid var(--line); color: var(--dim);
   border-radius: 999px; padding: 3px 9px;
 }
-.chip.method { border-color: rgba(77, 216, 199, 0.35); color: var(--teal); }
+.chip.method { border-color: var(--teal-border); color: var(--teal); }
+.chip.default {
+  border-color: var(--teal-border); color: var(--teal);
+  margin-left: 8px; font-size: 9px; padding: 2px 7px; vertical-align: 2px;
+}
+
+/* ── chip rows: topic filter + feed sort ── */
+.chiprow {
+  display: flex; gap: 6px; align-items: center;
+  overflow-x: auto; padding: 2px 2px 8px;
+  scrollbar-width: none;
+}
+.chiprow::-webkit-scrollbar { display: none; }
+.chiprow .chip { flex: 0 0 auto; background: var(--panel); white-space: nowrap; }
+.chiprow .chip.on {
+  border-color: var(--teal-border); color: var(--teal); background: var(--teal-bg);
+}
 
 /* ── ODMR dip relevance indicator (the signature) ── */
 .odmr { margin-top: 12px; }
@@ -133,15 +169,15 @@ a:hover { text-decoration: underline; }
   transition: transform 0.08s;
 }
 .btn:active { transform: scale(0.97); }
-.btn.save { border-color: rgba(255, 90, 87, 0.5); color: var(--red); }
+.btn.save { border-color: var(--red-border); color: var(--red); }
 .btn.skip { color: var(--dim); }
 .btn.ghost { flex: 0 0 auto; padding: 11px 14px; color: var(--teal); }
 .btn[disabled] { opacity: 0.45; cursor: default; }
 
 .analysis {
   margin-top: 12px; padding: 12px;
-  background: rgba(77, 216, 199, 0.05);
-  border: 1px solid rgba(77, 216, 199, 0.25);
+  background: var(--teal-bg);
+  border: 1px solid var(--teal-border);
   border-radius: 10px;
   font-size: 13.5px; line-height: 1.55;
   white-space: pre-wrap;
@@ -216,6 +252,24 @@ a:hover { text-decoration: underline; }
   text-transform: uppercase; letter-spacing: 0.1em;
   margin: 22px 0 8px;
 }
+
+/* ── share fallback sheet ── */
+.share-overlay {
+  position: fixed; inset: 0; z-index: 50;
+  background: rgba(0, 0, 0, 0.45);
+  display: flex; align-items: flex-end; justify-content: center;
+}
+.share-sheet {
+  width: 100%; max-width: 680px;
+  background: var(--panel); border: 1px solid var(--line);
+  border-radius: 14px 14px 0 0;
+  padding: 16px 16px calc(16px + env(safe-area-inset-bottom));
+  display: flex; flex-direction: column; gap: 8px;
+}
+.share-sheet a, .share-sheet button {
+  border: 1px solid var(--line); flex: none; padding: 11px 14px; text-align: center;
+}
+.share-sheet a:hover { text-decoration: none; }
 
 .spin { animation: rot 1s linear infinite; }
 @keyframes rot { to { transform: rotate(360deg); } }

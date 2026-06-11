@@ -1,5 +1,5 @@
 /* SpinStack service worker — offline shell + last-known papers feed. */
-const CACHE = "spinstack-v2-1";
+const CACHE = "spinstack-v2-2";
 
 self.addEventListener("install", () => self.skipWaiting());
 

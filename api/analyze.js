@@ -4,10 +4,12 @@
 
 export default async function handler(req, res) {
   if (req.method !== "POST") {
+    console.error("analyze:", `method ${req.method} not allowed`);
     return res.status(405).json({ error: "POST only" });
   }
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) {
+    console.error("analyze:", "ANTHROPIC_API_KEY not set");
     return res
       .status(500)
       .json({ error: "ANTHROPIC_API_KEY not set in Vercel project environment variables." });
@@ -15,6 +17,7 @@ export default async function handler(req, res) {
 
   const { paper, context } = req.body || {};
   if (!paper || !paper.title) {
+    console.error("analyze:", "missing paper in request body");
     return res.status(400).json({ error: "Missing paper in request body." });
   }
 
@@ -56,6 +59,7 @@ export default async function handler(req, res) {
     });
     const data = await r.json();
     if (!r.ok) {
+      console.error("analyze:", `Anthropic API ${r.status}: ${data?.error?.message || "no message"}`);
       return res.status(502).json({ error: data?.error?.message || `Anthropic API ${r.status}` });
     }
     const text = (data.content || [])
@@ -65,6 +69,7 @@ export default async function handler(req, res) {
       .trim();
     return res.status(200).json({ analysis: text || "Empty response from model." });
   } catch (err) {
+    console.error("analyze:", err);
     return res.status(502).json({ error: `Analysis failed: ${err.message}` });
   }
 }

@@ -14,6 +14,23 @@ learning, daily harvest feed, Gemini summaries (pre-generated), Claude
 4. On your phone: open the Vercel URL → "Add to Home Screen". Same on
    desktop Chrome via the install icon in the address bar.
 
+## Phase A — manual checklist
+
+After deploying, verify by hand:
+
+- [ ] Theme toggle (Setup → Theme, AUTO/DARK/LIGHT) switches the palette
+      and persists across reload; AUTO follows the system preference.
+- [ ] "Re-run search" (Stack empty state or Setup → Maintenance) adds
+      papers on a fresh profile and toasts the count.
+- [ ] Sort chips above the feed (RELEVANCE/NEWEST/YEAR) reorder cards;
+      choice persists. Swipe deck stays relevance-ordered.
+- [ ] Hiding a topic (eye icon in Topics) removes its filter chip and its
+      scoring boost from the feed; restore/rename/DEFAULT chip work.
+- [ ] Topic filter chips (ALL + topics above the Stack) narrow the feed.
+- [ ] Share works on every card — native sheet on mobile, the
+      WhatsApp/Email/Copy fallback on desktop at minimum.
+- [ ] Analyze failures appear in Vercel runtime logs as `analyze: …`.
+
 ## Notes
 - Sync: all devices share one DB row (`SHARED_ID` in `src/sync.js`).
   No login means anyone who reads your site's JS could find that ID —
