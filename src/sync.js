@@ -30,6 +30,7 @@ export const SYNC_KEYS = [
   "ss2_affinity", // {topics:{name:weight}, authors:{name:weight}}
   "ss2_analyses", // {paperId: {text, at}} — Claude "why this matters" cache
   "ss2_settings", // {uiMode, harvestUrl, ...}
+  "ss2_annot", // {paperId: [{id, page, quote, prefix, suffix, color, note?, deleted?, at}]}
   "ss2_last_seen", // ISO timestamp — newest harvest the user has seen
   "ss2_swipe_log", // [{id, kept, at}] capped log
 ];
@@ -113,6 +114,22 @@ function mergeSnapshots(local, remote) {
     if (!analyses[id] || (a.at || "") > (analyses[id].at || "")) analyses[id] = a;
   }
   out.ss2_analyses = analyses;
+
+  // annotations: per-paper union by annotation id, newer `at` wins on
+  // conflict (removals are `deleted` tombstones so they survive the
+  // union), cap 300 per paper
+  const annot = { ...(remote.ss2_annot || {}) };
+  for (const [pid, list] of Object.entries(local.ss2_annot || {})) {
+    const byId = new Map((annot[pid] || []).map((a) => [a.id, a]));
+    for (const a of list || []) {
+      const prev = byId.get(a.id);
+      if (!prev || (a.at || "") >= (prev.at || "")) byId.set(a.id, a);
+    }
+    annot[pid] = [...byId.values()]
+      .sort((x, y) => (x.at || "").localeCompare(y.at || ""))
+      .slice(-300);
+  }
+  out.ss2_annot = annot;
 
   // settings: newer updatedAt wins wholesale
   const setl = local.ss2_settings || {};

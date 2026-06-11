@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { Suspense, useEffect, useMemo, useRef, useState } from "react";
 import {
   Layers,
   List,
@@ -15,8 +15,13 @@ import {
   Eye,
   EyeOff,
   Pencil,
+  BookOpen,
+  Landmark,
 } from "lucide-react";
 import { sGet, persist, onSyncStatus } from "./sync.js";
+
+// pdf.js rides in its own chunk — only loaded when a PDF is opened
+const Reader = React.lazy(() => import("./Reader.jsx"));
 
 const HARVEST_URL =
   "https://raw.githubusercontent.com/lioned97/spinstack-harvest/main/papers/latest.json";
@@ -72,6 +77,21 @@ const THEME_COLORS = { dark: "#0a0e12", light: "#f4f6f8" };
 const nowISO = () => new Date().toISOString();
 
 const catOf = (x) => (x && x.category) || "science";
+
+function arxivIdOf(p) {
+  if (p.arxivId) return String(p.arxivId).replace(/v\d+$/, "");
+  if (typeof p.id === "string" && p.id.startsWith("arxiv:")) return p.id.slice(6);
+  const m = `${p.url || ""} ${p.pdf || ""}`.match(/arxiv\.org\/(?:abs|pdf)\/([0-9.]+)/i);
+  return m ? m[1].replace(/\.$/, "") : null;
+}
+
+const isArxivUrl = (u) => {
+  try {
+    return /(^|\.)arxiv\.org$/i.test(new URL(u).hostname);
+  } catch {
+    return false;
+  }
+};
 
 const isDefaultTopic = (t) =>
   (DEFAULT_TOPICS[catOf(t)] || []).some(
@@ -272,6 +292,8 @@ export default function App() {
   );
   const [affinity, setAffinity] = useState(() => sGet("ss2_affinity", { topics: {}, authors: {} }));
   const [analyses, setAnalyses] = useState(() => sGet("ss2_analyses", {}));
+  const [annots, setAnnots] = useState(() => sGet("ss2_annot", {}));
+  const [readingPaper, setReadingPaper] = useState(null); // {paper, url}
   const [settings, setSettings] = useState(() =>
     sGet("ss2_settings", {
       uiMode: "feed",
@@ -707,6 +729,55 @@ export default function App() {
     });
   }
 
+  // ── PDF reader (C1) ──
+  function saveAnnotsFor(paperId, list) {
+    const na = { ...annots, [paperId]: list.slice(-300) };
+    setAnnots(na);
+    persist("ss2_annot", na);
+  }
+
+  // resolution order: paper.pdf → arXiv id → Unpaywall (needs email) → none
+  const canRead = (p) =>
+    !!(p.pdf || arxivIdOf(p) || (p.doi && settings.email));
+
+  async function openReader(p) {
+    let pdfUrl = p.pdf || null;
+    const ax = arxivIdOf(p);
+    if (!pdfUrl && ax) pdfUrl = `https://arxiv.org/pdf/${ax}`;
+    if (!pdfUrl && p.doi && settings.email) {
+      showToast("Looking for an open-access PDF…");
+      try {
+        const res = await fetch(
+          `https://api.unpaywall.org/v2/${encodeURIComponent(p.doi)}?email=${encodeURIComponent(
+            settings.email
+          )}`
+        );
+        if (res.ok) {
+          const d = await res.json();
+          pdfUrl = d.best_oa_location?.url_for_pdf || null;
+          if (pdfUrl) {
+            // cache the resolution on the pool item (device-local)
+            const merged = pool.map((x) => (x.id === p.id ? { ...x, pdf: pdfUrl } : x));
+            setPool(merged);
+            localStorage.setItem("ss2_pool", JSON.stringify(merged));
+          }
+        }
+      } catch {}
+    }
+    if (!pdfUrl) {
+      if (settings.libraryProxy && p.url) {
+        window.open(settings.libraryProxy + encodeURIComponent(p.url), "_blank");
+        showToast("Opening via library proxy");
+      } else {
+        showToast("No open-access PDF found");
+      }
+      return;
+    }
+    // arXiv goes through our proxy (CORS); other hosts are tried direct
+    const fetchUrl = isArxivUrl(pdfUrl) ? `/api/pdf?url=${encodeURIComponent(pdfUrl)}` : pdfUrl;
+    setReadingPaper({ paper: p, url: fetchUrl });
+  }
+
   // ── share ──
   function buildShareText(p) {
     const list = p.authors || [];
@@ -877,6 +948,26 @@ export default function App() {
             <button className="btn ghost" onClick={() => setExpanded((x) => ({ ...x, [p.id]: true }))}>
               More
             </button>
+          )}
+          {canRead(p) ? (
+            <button className="btn ghost" onClick={() => openReader(p)} title="Read PDF" aria-label="Read PDF">
+              <BookOpen size={15} style={{ verticalAlign: "-3px" }} />
+            </button>
+          ) : (
+            settings.libraryProxy &&
+            p.url && (
+              <button
+                className="btn ghost"
+                onClick={() => {
+                  window.open(settings.libraryProxy + encodeURIComponent(p.url), "_blank");
+                  showToast("Opening via library proxy");
+                }}
+                title="Open via library"
+                aria-label="Open via library"
+              >
+                <Landmark size={15} style={{ verticalAlign: "-3px" }} />
+              </button>
+            )
           )}
           <button className="btn ghost" onClick={() => share(p)} title="Share" aria-label="Share">
             <Share2 size={15} style={{ verticalAlign: "-3px" }} />
@@ -1086,6 +1177,11 @@ export default function App() {
                   >
                     <Sparkles size={16} color={analyzingId === p.id ? "var(--teal)" : "var(--dim)"} />
                   </button>
+                  {canRead(p) && (
+                    <button onClick={() => openReader(p)} title="Read PDF" aria-label="Read PDF">
+                      <BookOpen size={16} color="var(--dim)" />
+                    </button>
+                  )}
                   <button onClick={() => share(p)} title="Share" aria-label="Share">
                     <Share2 size={16} color="var(--dim)" />
                   </button>
@@ -1257,6 +1353,28 @@ export default function App() {
             </p>
           </div>
           <div className="field">
+            <label>Reader</label>
+            <input
+              className="input"
+              type="email"
+              placeholder="you@university.edu — for Unpaywall OA lookup"
+              value={settings.email || ""}
+              onChange={(e) => updateSettings({ email: e.target.value.trim() })}
+              style={{ marginBottom: 8 }}
+            />
+            <input
+              className="input"
+              placeholder="Library proxy prefix, e.g. https://ezproxy.huji.ac.il/login?url="
+              value={settings.libraryProxy || ""}
+              onChange={(e) => updateSettings({ libraryProxy: e.target.value.trim() })}
+            />
+            <p className="hint">
+              Email unlocks Unpaywall open-access PDF lookup for DOI papers. The library proxy
+              opens paywalled papers in your browser via your institution — credentials never
+              touch the app.
+            </p>
+          </div>
+          <div className="field">
             <label>Sync</label>
             <p className="hint">
               All devices share one database row — no login. Status:{" "}
@@ -1318,6 +1436,26 @@ export default function App() {
           SETUP
         </button>
       </nav>
+
+      {readingPaper && (
+        <Suspense
+          fallback={
+            <div className="reader">
+              <div className="empty">Loading reader…</div>
+            </div>
+          }
+        >
+          <Reader
+            paper={readingPaper.paper}
+            url={readingPaper.url}
+            annots={annots[readingPaper.paper.id] || []}
+            onSave={(list) => saveAnnotsFor(readingPaper.paper.id, list)}
+            onClose={() => setReadingPaper(null)}
+            onAction={() => showToast("EXPLAIN & QUESTIONS land in the next update")}
+            showToast={showToast}
+          />
+        </Suspense>
+      )}
 
       {sharePaper && (
         <div className="share-overlay" onClick={() => setSharePaper(null)}>
