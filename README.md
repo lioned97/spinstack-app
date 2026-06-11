@@ -14,6 +14,21 @@ learning, daily harvest feed, Gemini summaries (pre-generated), Claude
 4. On your phone: open the Vercel URL → "Add to Home Screen". Same on
    desktop Chrome via the install icon in the address bar.
 
+## Phase C — manual checklist
+
+- [ ] "Read" opens an arXiv paper full-screen; text selectable on phone
+      and desktop; +/- zoom; pages render as you scroll.
+- [ ] Select text → pill menu; HIGHLIGHT paints and survives reload +
+      second device; NOTE attaches text; tap highlight → edit/remove.
+- [ ] EXPLAIN returns ≤3 sentences into the chat; QUESTIONS shows 3
+      tappable chips that send into the chat.
+- [ ] Chat opens from the card chat icon too, survives reload, and
+      appears on a second device.
+- [ ] Figures: science arXiv card "More" shows up to 3 figure thumbnails
+      → tap for full-screen; non-arXiv cards show none.
+- [ ] Settings → Reader: email enables Unpaywall lookup for DOI papers;
+      library proxy opens paywalled papers via the institution.
+
 ## Phase B — manual checklist
 
 - [ ] Add a travel topic (Topics → TRAVEL picker) — Wikivoyage/Wikipedia

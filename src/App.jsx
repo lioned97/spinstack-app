@@ -17,6 +17,8 @@ import {
   Pencil,
   BookOpen,
   Landmark,
+  MessageCircle,
+  Send,
 } from "lucide-react";
 import { sGet, persist, onSyncStatus } from "./sync.js";
 
@@ -294,6 +296,11 @@ export default function App() {
   const [analyses, setAnalyses] = useState(() => sGet("ss2_analyses", {}));
   const [annots, setAnnots] = useState(() => sGet("ss2_annot", {}));
   const [readingPaper, setReadingPaper] = useState(null); // {paper, url}
+  const [chats, setChats] = useState(() => sGet("ss2_chats", {})); // {paperId: [{role, text, at}]}
+  const [chatFor, setChatFor] = useState(null); // {paper, selection?, questions?: []}
+  const [chatBusy, setChatBusy] = useState(false);
+  const [chatDraft, setChatDraft] = useState("");
+  const [lightbox, setLightbox] = useState(null); // dataURL of full-screen figure
   const [settings, setSettings] = useState(() =>
     sGet("ss2_settings", {
       uiMode: "feed",
@@ -323,6 +330,13 @@ export default function App() {
   const [deckIndex, setDeckIndex] = useState(0);
   const [drag, setDrag] = useState({ x: 0, active: false });
   const dragStart = useRef(0);
+  const chatMsgsRef = useRef(null);
+
+  // keep the chat scrolled to the newest message
+  useEffect(() => {
+    const el = chatMsgsRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [chats, chatFor, chatBusy]);
 
   useEffect(() => onSyncStatus(setSyncStatus), []);
 
@@ -389,9 +403,26 @@ export default function App() {
       if (!res.ok) throw new Error(`feed ${res.status}`);
       const raw = await res.json();
       const incoming = (Array.isArray(raw) ? raw : raw.papers || []).filter(qualityFilter);
-      // merge with existing pool (live-injected topic papers survive refresh)
+      // merge with existing pool (live-injected topic papers survive refresh);
+      // carry over device-local enrichments (figures, resolved pdf) so a
+      // fresh harvest record doesn't clobber them
+      const prevById = new Map(pool.map((x) => [x.id, x]));
       const byId = new Map();
-      for (const p of [...incoming, ...pool]) if (p?.id && !byId.has(p.id)) byId.set(p.id, p);
+      for (const p of [...incoming, ...pool]) {
+        if (!p?.id || byId.has(p.id)) continue;
+        const old = prevById.get(p.id);
+        byId.set(
+          p.id,
+          old && old !== p
+            ? {
+                ...p,
+                pdf: p.pdf ?? old.pdf,
+                figures: p.figures ?? old.figures,
+                figuresTried: p.figuresTried ?? old.figuresTried,
+              }
+            : p
+        );
+      }
       const merged = [...byId.values()];
       setPool(merged);
       localStorage.setItem("ss2_pool", JSON.stringify(merged)); // device-local cache, not synced
@@ -778,6 +809,104 @@ export default function App() {
     setReadingPaper({ paper: p, url: fetchUrl });
   }
 
+  // ── paper chat (C2) ──
+  function appendChat(paperId, msg) {
+    setChats((prev) => {
+      const list = [...(prev[paperId] || []), msg].slice(-60);
+      const next = { ...prev, [paperId]: list };
+      persist("ss2_chats", next);
+      return next;
+    });
+  }
+
+  async function paperChatApi(mode, paper, selection, messages) {
+    const res = await fetch("/api/paper-chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        mode,
+        paper: { title: paper.title, abstract: paper.abstract, venue: paper.venue, year: paper.year },
+        selection,
+        messages,
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || `API ${res.status}`);
+    return data;
+  }
+
+  function openChat(paper) {
+    setChatDraft("");
+    setChatFor({ paper });
+  }
+
+  // EXPLAIN / QUESTIONS from the reader's selection menu
+  async function handlePaperAI(mode, paper, selection) {
+    setChatDraft("");
+    setChatFor({ paper, selection });
+    setChatBusy(true);
+    try {
+      if (mode === "explain") {
+        appendChat(paper.id, {
+          role: "user",
+          text: `Explain: “${selection.slice(0, 400)}${selection.length > 400 ? "…" : ""}”`,
+          at: nowISO(),
+        });
+        const d = await paperChatApi("explain", paper, selection);
+        appendChat(paper.id, { role: "assistant", text: d.text, at: nowISO() });
+      } else {
+        const d = await paperChatApi("questions", paper, selection);
+        setChatFor({ paper, selection, questions: d.questions || [] });
+      }
+    } catch (err) {
+      showToast(`Chat failed: ${err.message}`.slice(0, 120));
+    } finally {
+      setChatBusy(false);
+    }
+  }
+
+  async function sendChat(text) {
+    const msg = (text || "").trim();
+    if (!msg || !chatFor || chatBusy) return;
+    const paper = chatFor.paper;
+    const history = [...(chats[paper.id] || []), { role: "user", text: msg }]
+      .slice(-12)
+      .map(({ role, text: t }) => ({ role, text: t }));
+    appendChat(paper.id, { role: "user", text: msg, at: nowISO() });
+    setChatDraft("");
+    setChatFor((c) => (c ? { ...c, questions: undefined } : c));
+    setChatBusy(true);
+    try {
+      const d = await paperChatApi("chat", paper, chatFor.selection, history);
+      appendChat(paper.id, { role: "assistant", text: d.text, at: nowISO() });
+    } catch (err) {
+      showToast(`Chat failed: ${err.message}`.slice(0, 120));
+    } finally {
+      setChatBusy(false);
+    }
+  }
+
+  // ── figures (C2): lazy-extracted from arXiv PDFs, device-local cache ──
+  async function loadFigures(p) {
+    const ax = arxivIdOf(p);
+    if (!ax) return;
+    const stamp = (patch) => {
+      setPool((prev) => {
+        const merged = prev.map((x) => (x.id === p.id ? { ...x, ...patch } : x));
+        localStorage.setItem("ss2_pool", JSON.stringify(merged));
+        return merged;
+      });
+    };
+    stamp({ figuresTried: true });
+    try {
+      const res = await fetch(`/api/figures?arxiv=${encodeURIComponent(ax)}`);
+      const d = res.ok ? await res.json() : { figures: [] };
+      stamp({ figures: d.figures || [], figuresTried: true });
+    } catch {
+      /* offline or function cold-failed — figuresTried stays set */
+    }
+  }
+
   // ── share ──
   function buildShareText(p) {
     const list = p.authors || [];
@@ -863,6 +992,14 @@ export default function App() {
     const layout = CATEGORY_LAYOUTS[cat] || CATEGORY_LAYOUTS.science;
     const imgs = (p.images || []).filter(Boolean);
     const score = p._score ?? scoreCard(p, visibleTopics, affinity);
+
+    // lazy figure extraction for opened science arXiv cards (once per device)
+    useEffect(() => {
+      if (open && cat === "science" && !p.figures && !p.figuresTried && arxivIdOf(p)) {
+        loadFigures(p);
+      }
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [open]);
     return (
       <article className={`card${deck && drag.active ? " dragging" : ""}`} style={style}>
         <div className="eyebrow">
@@ -893,6 +1030,13 @@ export default function App() {
           <div className="carousel">
             {imgs.slice(0, 5).map((src) => (
               <img key={src} src={src} loading="lazy" alt="" />
+            ))}
+          </div>
+        )}
+        {open && cat === "science" && (p.figures || []).length > 0 && (
+          <div className="figrow">
+            {p.figures.slice(0, 3).map((src, i) => (
+              <img key={i} src={src} loading="lazy" alt={`Figure ${i + 1}`} onClick={() => setLightbox(src)} />
             ))}
           </div>
         )}
@@ -969,6 +1113,9 @@ export default function App() {
               </button>
             )
           )}
+          <button className="btn ghost" onClick={() => openChat(p)} title="Chat about this paper" aria-label="Chat about this paper">
+            <MessageCircle size={15} style={{ verticalAlign: "-3px" }} />
+          </button>
           <button className="btn ghost" onClick={() => share(p)} title="Share" aria-label="Share">
             <Share2 size={15} style={{ verticalAlign: "-3px" }} />
           </button>
@@ -1182,6 +1329,9 @@ export default function App() {
                       <BookOpen size={16} color="var(--dim)" />
                     </button>
                   )}
+                  <button onClick={() => openChat(p)} title="Chat" aria-label="Chat about this paper">
+                    <MessageCircle size={16} color="var(--dim)" />
+                  </button>
                   <button onClick={() => share(p)} title="Share" aria-label="Share">
                     <Share2 size={16} color="var(--dim)" />
                   </button>
@@ -1451,10 +1601,76 @@ export default function App() {
             annots={annots[readingPaper.paper.id] || []}
             onSave={(list) => saveAnnotsFor(readingPaper.paper.id, list)}
             onClose={() => setReadingPaper(null)}
-            onAction={() => showToast("EXPLAIN & QUESTIONS land in the next update")}
+            onAction={(mode, { selection }) => handlePaperAI(mode, readingPaper.paper, selection)}
             showToast={showToast}
           />
         </Suspense>
+      )}
+
+      {chatFor && (
+        <div className="share-overlay chat-overlay" onClick={() => setChatFor(null)}>
+          <div className="share-sheet chat-sheet" onClick={(e) => e.stopPropagation()}>
+            <div className="section-h" style={{ margin: 0 }}>
+              Paper chat · Claude
+            </div>
+            <p className="hint" style={{ margin: 0 }}>
+              {chatFor.paper.title.slice(0, 90)}
+              {chatFor.paper.title.length > 90 ? "…" : ""}
+            </p>
+            <div className="chat-msgs" ref={chatMsgsRef}>
+              {(chats[chatFor.paper.id] || []).length === 0 && !chatBusy && (
+                <p className="hint">
+                  Ask anything about this paper — or select text in the reader and tap EXPLAIN /
+                  QUESTIONS.
+                </p>
+              )}
+              {(chats[chatFor.paper.id] || []).map((m, i) => (
+                <div key={`${m.at}-${i}`} className={`bubble ${m.role}`}>
+                  {m.text}
+                </div>
+              ))}
+              {chatBusy && <div className="bubble assistant">…</div>}
+            </div>
+            {(chatFor.questions || []).length > 0 && (
+              <div className="chips">
+                {chatFor.questions.map((q) => (
+                  <button key={q} className="chip qchip" onClick={() => sendChat(q)}>
+                    {q}
+                  </button>
+                ))}
+              </div>
+            )}
+            <form
+              className="chat-input"
+              onSubmit={(e) => {
+                e.preventDefault();
+                sendChat(chatDraft);
+              }}
+            >
+              <input
+                className="input"
+                placeholder="Ask about this paper…"
+                value={chatDraft}
+                onChange={(e) => setChatDraft(e.target.value)}
+              />
+              <button
+                className="btn ghost"
+                type="submit"
+                disabled={chatBusy || !chatDraft.trim()}
+                aria-label="Send"
+                style={{ border: "1px solid var(--line)" }}
+              >
+                <Send size={15} />
+              </button>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {lightbox && (
+        <div className="lightbox" onClick={() => setLightbox(null)}>
+          <img src={lightbox} alt="Figure" />
+        </div>
       )}
 
       {sharePaper && (

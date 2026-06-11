@@ -31,6 +31,7 @@ export const SYNC_KEYS = [
   "ss2_analyses", // {paperId: {text, at}} — Claude "why this matters" cache
   "ss2_settings", // {uiMode, harvestUrl, ...}
   "ss2_annot", // {paperId: [{id, page, quote, prefix, suffix, color, note?, deleted?, at}]}
+  "ss2_chats", // {paperId: [{role, text, at}]} — paper chat history, capped 60/paper
   "ss2_last_seen", // ISO timestamp — newest harvest the user has seen
   "ss2_swipe_log", // [{id, kept, at}] capped log
 ];
@@ -130,6 +131,17 @@ function mergeSnapshots(local, remote) {
       .slice(-300);
   }
   out.ss2_annot = annot;
+
+  // chats: per-paper union by (at, role), sorted by at, cap 60
+  const chats = { ...(remote.ss2_chats || {}) };
+  for (const [pid, list] of Object.entries(local.ss2_chats || {})) {
+    const byKey = new Map((chats[pid] || []).map((m) => [`${m.at}|${m.role}`, m]));
+    for (const m of list || []) byKey.set(`${m.at}|${m.role}`, m);
+    chats[pid] = [...byKey.values()]
+      .sort((x, y) => (x.at || "").localeCompare(y.at || ""))
+      .slice(-60);
+  }
+  out.ss2_chats = chats;
 
   // settings: newer updatedAt wins wholesale
   const setl = local.ss2_settings || {};
