@@ -447,7 +447,7 @@ export default function App() {
     const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     try {
       const fresh = [];
-      for (const t of topics.filter((x) => !x.hidden)) {
+      for (const t of topics.filter((x) => !x.deleted && !x.hidden)) {
         if (catOf(t) === "travel") {
           for (const src of WIKI_SOURCES) {
             try {
@@ -507,7 +507,10 @@ export default function App() {
   }
 
   // ── derived ──
-  const visibleTopics = useMemo(() => topics.filter((t) => !t.hidden), [topics]);
+  // deleted topics are tombstones (so deletion survives the sync union —
+  // a hard remove would resurrect from the remote row on next pull)
+  const liveTopics = useMemo(() => topics.filter((t) => !t.deleted), [topics]);
+  const visibleTopics = useMemo(() => liveTopics.filter((t) => !t.hidden), [liveTopics]);
 
   // category switcher (B2): "all" | "science" | "travel"
   const activeCategory = settings.activeCategory || "all";
@@ -655,15 +658,19 @@ export default function App() {
     e.preventDefault();
     const name = newTopic.trim();
     if (!name) return;
-    if (topics.some((t) => t.name.toLowerCase() === name.toLowerCase())) {
+    if (topics.some((t) => !t.deleted && t.name.toLowerCase() === name.toLowerCase())) {
       setNewTopic("");
       return showToast("Topic already tracked");
     }
     const category = newTopicCategory;
-    const nt = [
-      ...topics,
-      { id: `${Date.now()}`, name, category, addedAt: nowISO(), updatedAt: nowISO() },
-    ];
+    const tomb = topics.find((t) => t.deleted && t.name.toLowerCase() === name.toLowerCase());
+    const nt = tomb
+      ? topics.map((t) =>
+          t === tomb
+            ? { ...t, deleted: false, hidden: false, category, updatedAt: nowISO() }
+            : t
+        )
+      : [...topics, { id: `${Date.now()}`, name, category, addedAt: nowISO(), updatedAt: nowISO() }];
     setTopics(nt);
     persist("ss2_topics", nt);
     setNewTopic("");
@@ -698,7 +705,10 @@ export default function App() {
   }
 
   function removeTopic(id) {
-    const nt = topics.filter((t) => t.id !== id);
+    // tombstone, not splice — see liveTopics
+    const nt = topics.map((t) =>
+      t.id === id ? { ...t, deleted: true, updatedAt: nowISO() } : t
+    );
     setTopics(nt);
     persist("ss2_topics", nt);
   }
@@ -724,7 +734,9 @@ export default function App() {
     const name = editName.trim();
     if (!name) return;
     if (
-      topics.some((t) => t.id !== editingTopicId && t.name.toLowerCase() === name.toLowerCase())
+      topics.some(
+        (t) => !t.deleted && t.id !== editingTopicId && t.name.toLowerCase() === name.toLowerCase()
+      )
     ) {
       return showToast("Topic already exists");
     }
@@ -734,18 +746,30 @@ export default function App() {
   }
 
   function restoreDefaults(category) {
-    const have = new Set(topics.map((t) => t.name.toLowerCase()));
-    const missing = (DEFAULT_TOPICS[category] || []).filter((d) => !have.has(d.toLowerCase()));
+    const live = new Set(liveTopics.map((t) => t.name.toLowerCase()));
+    const missing = (DEFAULT_TOPICS[category] || []).filter((d) => !live.has(d.toLowerCase()));
     if (missing.length === 0) return showToast(`All default ${category} topics present`);
-    const nt = [
-      ...topics,
-      ...missing.map((name, i) => ({
-        id: `${Date.now()}-${i}`,
-        name,
-        category,
-        addedAt: nowISO(),
-        updatedAt: nowISO(),
-      })),
+    const missingSet = new Set(missing.map((m) => m.toLowerCase()));
+    // revive tombstoned defaults, append truly new ones
+    let nt = topics.map((t) =>
+      t.deleted && missingSet.has(t.name.toLowerCase())
+        ? { ...t, deleted: false, hidden: false, category, updatedAt: nowISO() }
+        : t
+    );
+    const revived = new Set(
+      nt.filter((t) => !t.deleted).map((t) => t.name.toLowerCase())
+    );
+    nt = [
+      ...nt,
+      ...missing
+        .filter((name) => !revived.has(name.toLowerCase()))
+        .map((name, i) => ({
+          id: `${Date.now()}-${i}`,
+          name,
+          category,
+          addedAt: nowISO(),
+          updatedAt: nowISO(),
+        })),
     ];
     setTopics(nt);
     persist("ss2_topics", nt);
@@ -1382,7 +1406,7 @@ export default function App() {
             your feed.
           </p>
           {CATEGORIES.map((cat) => {
-            const catTopics = topics.filter((t) => catOf(t) === cat);
+            const catTopics = liveTopics.filter((t) => catOf(t) === cat);
             return (
               <div key={cat}>
                 <div className="section-h">{cat} topics</div>

@@ -26,7 +26,9 @@ const HEADERS = {
 export const SYNC_KEYS = [
   "ss2_saved", // {id: paper} — papers you kept
   "ss2_skipped", // {id: true} — papers you dismissed
-  "ss2_topics", // [{id, name, category?, addedAt, updatedAt?, hidden?}] — category missing = science
+  "ss2_topics", // [{id, name, category?, addedAt, updatedAt?, hidden?, deleted?}]
+  //               category missing = science; deleted = tombstone (kept so
+  //               the per-name union can't resurrect removed topics)
   "ss2_affinity", // {topics:{name:weight}, authors:{name:weight}}
   "ss2_analyses", // {paperId: {text, at}} — Claude "why this matters" cache
   "ss2_settings", // {uiMode, harvestUrl, ...}
