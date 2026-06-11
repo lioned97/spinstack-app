@@ -253,6 +253,37 @@ a:hover { text-decoration: underline; }
   margin: 22px 0 8px;
 }
 
+/* ── category switcher (Stack) ── */
+.catbar { display: flex; justify-content: center; margin-bottom: 8px; }
+
+/* ── travel card: thumbnail + carousel + MATCH label ── */
+.thumbrow { display: flex; gap: 12px; align-items: flex-start; margin-bottom: 6px; }
+.thumbrow img.thumb {
+  width: 84px; height: 84px; flex: 0 0 auto;
+  object-fit: cover; border-radius: 10px;
+  border: 1px solid var(--line); background: var(--panel-2);
+}
+.thumbrow h2 { margin-bottom: 0; }
+.carousel {
+  display: flex; gap: 8px; overflow-x: auto;
+  margin: 10px 0 2px; scroll-snap-type: x mandatory;
+  scrollbar-width: none;
+}
+.carousel::-webkit-scrollbar { display: none; }
+.carousel img {
+  height: 160px; max-width: 86%; flex: 0 0 auto;
+  object-fit: cover; border-radius: 10px;
+  border: 1px solid var(--line); background: var(--panel-2);
+  scroll-snap-align: start;
+}
+.match-lbl {
+  font-family: var(--mono); font-size: 10px; color: var(--dim);
+  letter-spacing: 0.08em; margin-top: 12px;
+}
+.match-lbl b { color: var(--red); font-weight: 600; }
+
+textarea.input { font: inherit; resize: vertical; line-height: 1.5; }
+
 /* ── share fallback sheet ── */
 .share-overlay {
   position: fixed; inset: 0; z-index: 50;

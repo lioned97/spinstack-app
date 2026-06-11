@@ -14,6 +14,18 @@ learning, daily harvest feed, Gemini summaries (pre-generated), Claude
 4. On your phone: open the Vercel URL → "Add to Home Screen". Same on
    desktop Chrome via the install icon in the address bar.
 
+## Phase B — manual checklist
+
+- [ ] Add a travel topic (Topics → TRAVEL picker) — Wikivoyage/Wikipedia
+      results land with images; travel cards show the thumbnail, MATCH
+      label, and (open) the image carousel.
+- [ ] Category switcher (ALL/SCIENCE/TRAVEL atop Stack) filters feed and
+      deck; topic chips follow the active category.
+- [ ] Science cards look exactly as before (ODMR dip intact).
+- [ ] Share on a travel card shares the page URL.
+- [ ] Settings → "Travel article feeds" persists one URL per line and
+      syncs (harvester reads it next run).
+
 ## Phase A — manual checklist
 
 After deploying, verify by hand:

@@ -21,18 +21,49 @@ import { sGet, persist, onSyncStatus } from "./sync.js";
 const HARVEST_URL =
   "https://raw.githubusercontent.com/lioned97/spinstack-harvest/main/papers/latest.json";
 
-const DEFAULT_TOPICS = [
-  "NV center",
-  "nitrogen-vacancy",
-  "quantum sensing",
-  "magnetometry",
-  "open quantum systems",
-  "Lindblad dynamics",
-  "spin coherence",
-  "decoherence",
-  "Hamiltonian engineering",
-  "quantum memory",
-];
+// Topics belong to a category; each category has its own search engines
+// and card layout. Missing category anywhere = "science" (legacy data).
+const CATEGORIES = ["science", "travel"];
+
+const DEFAULT_TOPICS = {
+  science: [
+    "NV center",
+    "nitrogen-vacancy",
+    "quantum sensing",
+    "magnetometry",
+    "open quantum systems",
+    "Lindblad dynamics",
+    "spin coherence",
+    "decoherence",
+    "Hamiltonian engineering",
+    "quantum memory",
+  ],
+  // placeholders — edit freely, they're restorable per category
+  travel: ["Israel National Trail", "hiking Patagonia", "science museums Europe"],
+};
+
+const CATEGORY_ANCHORS = {
+  science: {
+    "nv center": 1.6,
+    "nitrogen-vacancy": 1.6,
+    "open quantum": 1.4,
+    decoherence: 1.35,
+    "quantum sensing": 1.3,
+    "spin coherence": 1.3,
+    magnetometry: 1.3,
+    lindblad: 1.25,
+    "hamiltonian engineering": 1.25,
+  },
+  travel: {},
+};
+
+// Layout switch per category so Phase C+ can add categories without
+// forking PaperCard: dip = ODMR relevance dip, thumb = closed-state
+// thumbnail, carousel = open-state image carousel.
+const CATEGORY_LAYOUTS = {
+  science: { dip: true, thumb: false, carousel: false },
+  travel: { dip: false, thumb: true, carousel: true },
+};
 
 const THEME_COLORS = { dark: "#0a0e12", light: "#f4f6f8" };
 
@@ -40,8 +71,12 @@ const THEME_COLORS = { dark: "#0a0e12", light: "#f4f6f8" };
 
 const nowISO = () => new Date().toISOString();
 
-const isDefaultTopic = (name) =>
-  DEFAULT_TOPICS.some((d) => d.toLowerCase() === (name || "").toLowerCase());
+const catOf = (x) => (x && x.category) || "science";
+
+const isDefaultTopic = (t) =>
+  (DEFAULT_TOPICS[catOf(t)] || []).some(
+    (d) => d.toLowerCase() === (t.name || "").toLowerCase()
+  );
 
 // OpenAlex ships abstracts as inverted index — rebuild text.
 function reconstructAbstract(inv) {
@@ -105,8 +140,53 @@ function normalizeS2(r) {
   };
 }
 
+// MediaWiki search (Wikivoyage/Wikipedia) → item schema, travel category.
+function normalizeWiki(page, { tag, venue, host }) {
+  if (!page) return null;
+  const title = page.title || "";
+  const extract = (page.extract || "").trim();
+  if (!title || extract.length < 120 || extract.includes("may refer to")) return null;
+  const thumb = page.thumbnail?.source;
+  return {
+    id: `${tag}:${page.pageid}`,
+    title,
+    abstract: extract.slice(0, 1200),
+    authors: [],
+    year: new Date().getFullYear(),
+    venue,
+    url: `https://${host}/wiki/${encodeURIComponent(title.replace(/ /g, "_"))}`,
+    images: thumb ? [thumb] : [],
+    category: "travel",
+    source: venue.toLowerCase(),
+    harvestedAt: nowISO(),
+  };
+}
+
+const WIKI_SOURCES = [
+  { tag: "wv", venue: "Wikivoyage", host: "en.wikivoyage.org" },
+  { tag: "wp", venue: "Wikipedia", host: "en.wikipedia.org" },
+];
+
+async function fetchWiki(topicName, src) {
+  const url =
+    `https://${src.host}/w/api.php?action=query&generator=search` +
+    `&gsrsearch=${encodeURIComponent(topicName)}&gsrlimit=6` +
+    `&prop=extracts%7Cpageimages&exintro=1&explaintext=1` +
+    `&piprop=thumbnail&pithumbsize=640&format=json&origin=*`;
+  const res = await fetch(url);
+  if (!res.ok) return [];
+  const data = await res.json();
+  return Object.values(data.query?.pages || {})
+    .map((p) => normalizeWiki(p, src))
+    .filter(Boolean);
+}
+
 function qualityFilter(p) {
   if (!p || !p.id || !p.title) return false;
+  if (catOf(p) === "travel") {
+    const a = p.abstract || "";
+    return a.length >= 120 && !a.includes("may refer to");
+  }
   const y = parseInt(p.year, 10);
   const cy = new Date().getFullYear();
   if (!(y >= 2000 && y <= cy + 1)) return false;
@@ -118,20 +198,11 @@ function qualityFilter(p) {
 
 function scoreCard(paper, topics, affinity) {
   let score = 1.0;
+  const cat = catOf(paper);
   const text = `${paper.title} ${paper.abstract || ""} ${paper.venue || ""}`.toLowerCase();
   const cy = new Date().getFullYear();
 
-  const anchors = {
-    "nv center": 1.6,
-    "nitrogen-vacancy": 1.6,
-    "open quantum": 1.4,
-    decoherence: 1.35,
-    "quantum sensing": 1.3,
-    "spin coherence": 1.3,
-    magnetometry: 1.3,
-    lindblad: 1.25,
-    "hamiltonian engineering": 1.25,
-  };
+  const anchors = CATEGORY_ANCHORS[cat] || {};
   for (const [k, w] of Object.entries(anchors)) if (text.includes(k)) score *= w;
 
   for (const t of topics) if (text.includes(t.name.toLowerCase())) score += 0.35;
@@ -143,14 +214,17 @@ function scoreCard(paper, topics, affinity) {
     if (w) score += w;
   }
 
-  const y = parseInt(paper.year, 10) || cy;
-  if (y > cy) score *= 0.6;
-  else if (y === cy) score *= 1.35;
-  else if (y === cy - 1) score *= 1.15;
-  else if (y < cy - 3) score *= 0.75;
+  // recency only matters for science — travel guides don't age like papers
+  if (cat === "science") {
+    const y = parseInt(paper.year, 10) || cy;
+    if (y > cy) score *= 0.6;
+    else if (y === cy) score *= 1.35;
+    else if (y === cy - 1) score *= 1.15;
+    else if (y < cy - 3) score *= 0.75;
 
-  if (text.includes("arxiv")) score += 0.2;
-  if (text.includes("experiment")) score += 0.15;
+    if (text.includes("arxiv")) score += 0.2;
+    if (text.includes("experiment")) score += 0.15;
+  }
   return score;
 }
 
@@ -183,13 +257,24 @@ export default function App() {
   const [topics, setTopics] = useState(() =>
     sGet(
       "ss2_topics",
-      DEFAULT_TOPICS.map((name, i) => ({ id: `d${i}`, name, addedAt: nowISO() }))
+      DEFAULT_TOPICS.science.map((name, i) => ({
+        id: `d${i}`,
+        name,
+        category: "science",
+        addedAt: nowISO(),
+      }))
     )
   );
   const [affinity, setAffinity] = useState(() => sGet("ss2_affinity", { topics: {}, authors: {} }));
   const [analyses, setAnalyses] = useState(() => sGet("ss2_analyses", {}));
   const [settings, setSettings] = useState(() =>
-    sGet("ss2_settings", { uiMode: "feed", harvestUrl: HARVEST_URL, theme: "auto", updatedAt: nowISO() })
+    sGet("ss2_settings", {
+      uiMode: "feed",
+      harvestUrl: HARVEST_URL,
+      theme: "auto",
+      activeCategory: "all",
+      updatedAt: nowISO(),
+    })
   );
   const [lastSeen, setLastSeen] = useState(() => sGet("ss2_last_seen", ""));
 
@@ -201,6 +286,10 @@ export default function App() {
   const [analyzingId, setAnalyzingId] = useState(null);
   const [expanded, setExpanded] = useState({});
   const [newTopic, setNewTopic] = useState("");
+  const [newTopicCategory, setNewTopicCategory] = useState("science");
+  const [feedsText, setFeedsText] = useState(() =>
+    (sGet("ss2_settings", {}).travelFeeds || []).join("\n")
+  );
   const [editingTopicId, setEditingTopicId] = useState(null);
   const [editName, setEditName] = useState("");
   const [sharePaper, setSharePaper] = useState(null);
@@ -274,6 +363,15 @@ export default function App() {
     try {
       const fresh = [];
       for (const t of topics.filter((x) => !x.hidden)) {
+        if (catOf(t) === "travel") {
+          for (const src of WIKI_SOURCES) {
+            try {
+              fresh.push(...(await fetchWiki(t.name, src)).filter(qualityFilter));
+            } catch {}
+            await sleep(300);
+          }
+          continue;
+        }
         try {
           const res = await fetch(
             `https://api.openalex.org/works?filter=title_and_abstract.search:${encodeURIComponent(
@@ -326,6 +424,16 @@ export default function App() {
   // ── derived ──
   const visibleTopics = useMemo(() => topics.filter((t) => !t.hidden), [topics]);
 
+  // category switcher (B2): "all" | "science" | "travel"
+  const activeCategory = settings.activeCategory || "all";
+  const chipTopics = useMemo(
+    () =>
+      activeCategory === "all"
+        ? visibleTopics
+        : visibleTopics.filter((t) => catOf(t) === activeCategory),
+    [visibleTopics, activeCategory]
+  );
+
   const triage = useMemo(() => {
     const list = pool.filter((p) => !saved[p.id] && !skipped[p.id]);
     return list
@@ -333,20 +441,28 @@ export default function App() {
       .sort((a, b) => b._score - a._score);
   }, [pool, saved, skipped, visibleTopics, affinity]);
 
-  // topic filter (A5): empty selection = ALL; stale/hidden names drop out
+  const categoryTriage = useMemo(
+    () =>
+      activeCategory === "all"
+        ? triage
+        : triage.filter((p) => catOf(p) === activeCategory),
+    [triage, activeCategory]
+  );
+
+  // topic filter (A5): empty selection = ALL; stale/hidden/off-category names drop out
   const feedFilter = useMemo(() => {
-    const names = new Set(visibleTopics.map((t) => t.name.toLowerCase()));
+    const names = new Set(chipTopics.map((t) => t.name.toLowerCase()));
     return (settings.feedFilter || []).filter((n) => names.has(n.toLowerCase()));
-  }, [settings.feedFilter, visibleTopics]);
+  }, [settings.feedFilter, chipTopics]);
 
   const filteredTriage = useMemo(() => {
-    if (feedFilter.length === 0) return triage;
+    if (feedFilter.length === 0) return categoryTriage;
     const wanted = feedFilter.map((n) => n.toLowerCase());
-    return triage.filter((p) => {
+    return categoryTriage.filter((p) => {
       const text = `${p.title} ${p.abstract || ""}`.toLowerCase();
       return wanted.some((n) => text.includes(n));
     });
-  }, [triage, feedFilter]);
+  }, [categoryTriage, feedFilter]);
 
   // feed sort (A3): deck always uses relevance (filteredTriage order)
   const sortMode = settings.sortMode || "relevance";
@@ -458,26 +574,39 @@ export default function App() {
       setNewTopic("");
       return showToast("Topic already tracked");
     }
-    const nt = [...topics, { id: `${Date.now()}`, name, addedAt: nowISO(), updatedAt: nowISO() }];
+    const category = newTopicCategory;
+    const nt = [
+      ...topics,
+      { id: `${Date.now()}`, name, category, addedAt: nowISO(), updatedAt: nowISO() },
+    ];
     setTopics(nt);
     persist("ss2_topics", nt);
     setNewTopic("");
-    showToast(`Tracking “${name}” — fetching papers…`);
-    // live OpenAlex injection (CORS-safe); daily harvest picks it up too
+    showToast(`Tracking “${name}” — fetching…`);
+    // live injection (CORS-safe); daily harvest picks it up too
     try {
-      const url = `https://api.openalex.org/works?filter=title_and_abstract.search:${encodeURIComponent(
-        name
-      )}&per_page=12&sort=publication_year:desc`;
-      const res = await fetch(url);
-      if (!res.ok) throw new Error();
-      const data = await res.json();
-      const fresh = (data.results || []).map(normalizeOpenAlex).filter(qualityFilter);
+      let fresh = [];
+      if (category === "travel") {
+        for (const src of WIKI_SOURCES) {
+          try {
+            fresh.push(...(await fetchWiki(name, src)).filter(qualityFilter));
+          } catch {}
+        }
+      } else {
+        const url = `https://api.openalex.org/works?filter=title_and_abstract.search:${encodeURIComponent(
+          name
+        )}&per_page=12&sort=publication_year:desc`;
+        const res = await fetch(url);
+        if (!res.ok) throw new Error();
+        const data = await res.json();
+        fresh = (data.results || []).map(normalizeOpenAlex).filter(qualityFilter);
+      }
       const byId = new Map();
       for (const p of [...fresh, ...pool]) if (p?.id && !byId.has(p.id)) byId.set(p.id, p);
       const merged = [...byId.values()];
       setPool(merged);
       localStorage.setItem("ss2_pool", JSON.stringify(merged));
-      showToast(`Added ${fresh.length} papers for “${name}”`);
+      showToast(`Added ${fresh.length} ${category === "travel" ? "guides" : "papers"} for “${name}”`);
     } catch {
       showToast("Live fetch failed — daily harvest will cover it");
     }
@@ -519,22 +648,23 @@ export default function App() {
     showToast("Topic renamed");
   }
 
-  function restoreDefaults() {
+  function restoreDefaults(category) {
     const have = new Set(topics.map((t) => t.name.toLowerCase()));
-    const missing = DEFAULT_TOPICS.filter((d) => !have.has(d.toLowerCase()));
-    if (missing.length === 0) return showToast("All default topics present");
+    const missing = (DEFAULT_TOPICS[category] || []).filter((d) => !have.has(d.toLowerCase()));
+    if (missing.length === 0) return showToast(`All default ${category} topics present`);
     const nt = [
       ...topics,
       ...missing.map((name, i) => ({
         id: `${Date.now()}-${i}`,
         name,
+        category,
         addedAt: nowISO(),
         updatedAt: nowISO(),
       })),
     ];
     setTopics(nt);
     persist("ss2_topics", nt);
-    showToast(`Restored ${missing.length} default topic${missing.length > 1 ? "s" : ""}`);
+    showToast(`Restored ${missing.length} default ${category} topic${missing.length > 1 ? "s" : ""}`);
   }
 
   function toggleFeedFilter(name) {
@@ -549,7 +679,7 @@ export default function App() {
   function buildShareText(p) {
     const list = p.authors || [];
     const authors = list.slice(0, 3).join(", ") + (list.length > 3 ? " et al." : "");
-    return `${p.title} — ${authors} · ${p.year}${p.summary ? `\n${p.summary}` : ""}`;
+    return `${p.title}${authors ? ` — ${authors}` : ""} · ${p.year}${p.summary ? `\n${p.summary}` : ""}`;
   }
 
   async function share(p) {
@@ -626,19 +756,43 @@ export default function App() {
     const isNew = (p.harvestedAt || "") > (lastSeen || "");
     const an = analyses[p.id];
     const open = !!expanded[p.id];
+    const cat = catOf(p);
+    const layout = CATEGORY_LAYOUTS[cat] || CATEGORY_LAYOUTS.science;
+    const imgs = (p.images || []).filter(Boolean);
+    const score = p._score ?? scoreCard(p, visibleTopics, affinity);
     return (
       <article className={`card${deck && drag.active ? " dragging" : ""}`} style={style}>
         <div className="eyebrow">
-          <span className="src">{p.source || p.venue || "paper"}</span>
+          <span className="src">
+            {cat === "science"
+              ? p.source || p.venue || "paper"
+              : `${cat} · ${p.source || p.venue || ""}`}
+          </span>
           <span>{p.year}</span>
-          {p.venue && <span>· {String(p.venue).slice(0, 36)}</span>}
+          {cat === "science" && p.venue && <span>· {String(p.venue).slice(0, 36)}</span>}
           {isNew && <span style={{ color: "var(--red)" }}>· NEW</span>}
         </div>
-        <h2>{p.title}</h2>
-        <div className="authors">
-          {(p.authors || []).slice(0, 4).join(", ")}
-          {(p.authors || []).length > 4 ? " et al." : ""}
-        </div>
+        {layout.thumb && imgs.length > 0 && !open ? (
+          <div className="thumbrow">
+            <img className="thumb" src={imgs[0]} loading="lazy" alt="" />
+            <h2>{p.title}</h2>
+          </div>
+        ) : (
+          <h2>{p.title}</h2>
+        )}
+        {(p.authors || []).length > 0 && (
+          <div className="authors">
+            {(p.authors || []).slice(0, 4).join(", ")}
+            {(p.authors || []).length > 4 ? " et al." : ""}
+          </div>
+        )}
+        {open && layout.carousel && imgs.length > 0 && (
+          <div className="carousel">
+            {imgs.slice(0, 5).map((src) => (
+              <img key={src} src={src} loading="lazy" alt="" />
+            ))}
+          </div>
+        )}
         {p.summary ? (
           <p className="summary">{p.summary}</p>
         ) : (
@@ -654,7 +808,13 @@ export default function App() {
             ))}
           </div>
         )}
-        <OdmrDip score={p._score ?? scoreCard(p, visibleTopics, affinity)} />
+        {layout.dip ? (
+          <OdmrDip score={score} />
+        ) : (
+          <div className="match-lbl">
+            MATCH <b>{score.toFixed(2)}</b>
+          </div>
+        )}
         {an && open && (
           <div className="analysis">
             <span className="tag">Why this matters · Claude</span>
@@ -751,7 +911,23 @@ export default function App() {
         </div>
       )}
 
-      {tab === "stack" && visibleTopics.length > 0 && (
+      {tab === "stack" && (
+        <div className="catbar">
+          <div className="mode" role="radiogroup" aria-label="Category">
+            {["all", ...CATEGORIES].map((c) => (
+              <button
+                key={c}
+                className={activeCategory === c ? "on" : ""}
+                onClick={() => updateSettings({ activeCategory: c })}
+              >
+                {c.toUpperCase()}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {tab === "stack" && chipTopics.length > 0 && (
         <div className="chiprow" role="group" aria-label="Filter by topic">
           <button
             className={`chip${feedFilter.length === 0 ? " on" : ""}`}
@@ -759,7 +935,7 @@ export default function App() {
           >
             ALL
           </button>
-          {visibleTopics.map((t) => (
+          {chipTopics.map((t) => (
             <button
               key={t.id}
               className={`chip${feedFilter.some((n) => n.toLowerCase() === t.name.toLowerCase()) ? " on" : ""}`}
@@ -908,70 +1084,95 @@ export default function App() {
               Add
             </button>
           </form>
-          <p className="hint">
-            New topics fetch papers immediately from OpenAlex and join the daily harvest from
-            tomorrow. Hidden topics (eye toggle) stay harvested but leave your feed.
-          </p>
-          <div className="section-h">Tracked topics</div>
-          {topics.map((t) => (
-            <div className="row" key={t.id} style={t.hidden ? { opacity: 0.55 } : undefined}>
-              <Hash size={14} color="var(--teal)" />
-              <div className="grow">
-                {editingTopicId === t.id ? (
-                  <form onSubmit={submitRename} style={{ display: "flex", gap: 8 }}>
-                    <input
-                      className="input"
-                      value={editName}
-                      onChange={(e) => setEditName(e.target.value)}
-                      autoFocus
-                      onKeyDown={(e) => e.key === "Escape" && setEditingTopicId(null)}
-                    />
-                    <button
-                      className="btn ghost"
-                      type="submit"
-                      style={{ border: "1px solid var(--line)" }}
-                    >
-                      Save
-                    </button>
-                  </form>
-                ) : (
-                  <>
-                    <div className="title">
-                      {t.name}
-                      {isDefaultTopic(t.name) && <span className="chip default">DEFAULT</span>}
-                    </div>
-                    {affinity.topics?.[t.name.toLowerCase()] !== undefined && (
-                      <div className="sub">
-                        learned weight {affinity.topics[t.name.toLowerCase()].toFixed(2)}
-                      </div>
-                    )}
-                  </>
-                )}
-              </div>
-              <button onClick={() => startRename(t)} title="Rename" aria-label={`Rename ${t.name}`}>
-                <Pencil size={15} color="var(--dim)" />
-              </button>
-              <button
-                onClick={() => toggleHidden(t)}
-                title={t.hidden ? "Show in feed" : "Hide from feed"}
-                aria-label={`${t.hidden ? "Show" : "Hide"} ${t.name}`}
-              >
-                {t.hidden ? <EyeOff size={15} color="var(--dim)" /> : <Eye size={15} color="var(--teal)" />}
-              </button>
-              <button onClick={() => removeTopic(t.id)} aria-label={`Remove ${t.name}`}>
-                <Trash2 size={15} color="var(--dim)" />
-              </button>
+          <div className="field" style={{ marginTop: -6 }}>
+            <div className="mode" role="radiogroup" aria-label="New topic category">
+              {CATEGORIES.map((c) => (
+                <button
+                  key={c}
+                  type="button"
+                  className={newTopicCategory === c ? "on" : ""}
+                  onClick={() => setNewTopicCategory(c)}
+                >
+                  {c.toUpperCase()}
+                </button>
+              ))}
             </div>
-          ))}
-          <div className="field" style={{ marginTop: 20 }}>
-            <button
-              className="btn ghost"
-              style={{ border: "1px solid var(--line)" }}
-              onClick={restoreDefaults}
-            >
-              Restore default topics
-            </button>
           </div>
+          <p className="hint">
+            Science topics fetch from OpenAlex, travel topics from Wikivoyage/Wikipedia — both join
+            the daily harvest from tomorrow. Hidden topics (eye toggle) stay harvested but leave
+            your feed.
+          </p>
+          {CATEGORIES.map((cat) => {
+            const catTopics = topics.filter((t) => catOf(t) === cat);
+            return (
+              <div key={cat}>
+                <div className="section-h">{cat} topics</div>
+                {catTopics.length === 0 && (
+                  <p className="hint">No {cat} topics tracked yet.</p>
+                )}
+                {catTopics.map((t) => (
+                  <div className="row" key={t.id} style={t.hidden ? { opacity: 0.55 } : undefined}>
+                    <Hash size={14} color="var(--teal)" />
+                    <div className="grow">
+                      {editingTopicId === t.id ? (
+                        <form onSubmit={submitRename} style={{ display: "flex", gap: 8 }}>
+                          <input
+                            className="input"
+                            value={editName}
+                            onChange={(e) => setEditName(e.target.value)}
+                            autoFocus
+                            onKeyDown={(e) => e.key === "Escape" && setEditingTopicId(null)}
+                          />
+                          <button
+                            className="btn ghost"
+                            type="submit"
+                            style={{ border: "1px solid var(--line)" }}
+                          >
+                            Save
+                          </button>
+                        </form>
+                      ) : (
+                        <>
+                          <div className="title">
+                            {t.name}
+                            {isDefaultTopic(t) && <span className="chip default">DEFAULT</span>}
+                          </div>
+                          {affinity.topics?.[t.name.toLowerCase()] !== undefined && (
+                            <div className="sub">
+                              learned weight {affinity.topics[t.name.toLowerCase()].toFixed(2)}
+                            </div>
+                          )}
+                        </>
+                      )}
+                    </div>
+                    <button onClick={() => startRename(t)} title="Rename" aria-label={`Rename ${t.name}`}>
+                      <Pencil size={15} color="var(--dim)" />
+                    </button>
+                    <button
+                      onClick={() => toggleHidden(t)}
+                      title={t.hidden ? "Show in feed" : "Hide from feed"}
+                      aria-label={`${t.hidden ? "Show" : "Hide"} ${t.name}`}
+                    >
+                      {t.hidden ? <EyeOff size={15} color="var(--dim)" /> : <Eye size={15} color="var(--teal)" />}
+                    </button>
+                    <button onClick={() => removeTopic(t.id)} aria-label={`Remove ${t.name}`}>
+                      <Trash2 size={15} color="var(--dim)" />
+                    </button>
+                  </div>
+                ))}
+                <div className="field">
+                  <button
+                    className="btn ghost"
+                    style={{ border: "1px solid var(--line)" }}
+                    onClick={() => restoreDefaults(cat)}
+                  >
+                    Restore default {cat} topics
+                  </button>
+                </div>
+              </div>
+            );
+          })}
         </main>
       )}
 
@@ -1000,6 +1201,28 @@ export default function App() {
               onChange={(e) => updateSettings({ harvestUrl: e.target.value })}
             />
             <p className="hint">Daily harvest output (papers/latest.json on GitHub).</p>
+          </div>
+          <div className="field">
+            <label>Travel article feeds</label>
+            <textarea
+              className="input"
+              rows={3}
+              placeholder="https://www.atlasobscura.com/feeds/latest"
+              value={feedsText}
+              onChange={(e) => setFeedsText(e.target.value)}
+              onBlur={() =>
+                updateSettings({
+                  travelFeeds: feedsText
+                    .split("\n")
+                    .map((s) => s.trim())
+                    .filter((s) => /^https?:\/\//.test(s)),
+                })
+              }
+            />
+            <p className="hint">
+              One RSS/Atom URL per line — the daily harvester pulls these into the travel
+              category.
+            </p>
           </div>
           <div className="field">
             <label>Sync</label>
