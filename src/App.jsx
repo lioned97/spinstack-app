@@ -328,6 +328,7 @@ export default function App() {
   const [lightbox, setLightbox] = useState(null); // dataURL of full-screen figure
   const [showMap, setShowMap] = useState(false); // travel places map overlay
   const [related, setRelated] = useState({}); // {paperId: {loading, items}} — session cache
+  const [aiStatus, setAiStatus] = useState(null); // {ok, provider} from /api/paper-chat health
   const [settings, setSettings] = useState(() =>
     sGet("ss2_settings", {
       uiMode: "feed",
@@ -366,6 +367,15 @@ export default function App() {
     const el = chatMsgsRef.current;
     if (el) el.scrollTop = el.scrollHeight;
   }, [chats, chatFor, chatBusy]);
+
+  // AI health check when Settings opens (which provider answers, if any)
+  useEffect(() => {
+    if (tab !== "settings" || aiStatus) return;
+    fetch("/api/paper-chat")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => setAiStatus(d || { ok: false, provider: null }))
+      .catch(() => setAiStatus({ ok: false, provider: null, offline: true }));
+  }, [tab, aiStatus]);
 
   useEffect(() => onSyncStatus(setSyncStatus), []);
 
@@ -586,16 +596,38 @@ export default function App() {
   // feed sort (A3): deck always uses relevance (filteredTriage order)
   const sortMode = settings.sortMode || "relevance";
   const feedList = useMemo(() => {
+    const list = [...filteredTriage];
     if (sortMode === "newest")
-      return [...filteredTriage].sort((a, b) =>
-        (b.harvestedAt || "").localeCompare(a.harvestedAt || "")
-      );
+      return list.sort((a, b) => (b.harvestedAt || "").localeCompare(a.harvestedAt || ""));
     if (sortMode === "year")
-      return [...filteredTriage].sort(
-        (a, b) => ((b.year || 0) - (a.year || 0)) || (b._score - a._score)
+      return list.sort((a, b) => ((b.year || 0) - (a.year || 0)) || (b._score - a._score));
+    if (sortMode === "papers")
+      // science papers before travel articles, relevance within each
+      return list.sort(
+        (a, b) =>
+          (catOf(a) === "science" ? 0 : 1) - (catOf(b) === "science" ? 0 : 1) ||
+          b._score - a._score
       );
+    if (sortMode === "source")
+      return list.sort(
+        (a, b) =>
+          String(a.venue || a.source || "").localeCompare(String(b.venue || b.source || "")) ||
+          b._score - a._score
+      );
+    if (sortMode === "title")
+      return list.sort((a, b) => String(a.title).localeCompare(String(b.title)));
     return filteredTriage;
   }, [filteredTriage, sortMode]);
+
+  // saved list sorting
+  const savedSort = settings.savedSort || "recent";
+  const savedList = useMemo(() => {
+    const list = Object.values(saved);
+    if (savedSort === "year") return list.sort((a, b) => (b.year || 0) - (a.year || 0));
+    if (savedSort === "title")
+      return list.sort((a, b) => String(a.title).localeCompare(String(b.title)));
+    return list.sort((a, b) => (b.savedAt || "").localeCompare(a.savedAt || ""));
+  }, [saved, savedSort]);
 
   const newCount = useMemo(
     () => triage.filter((p) => (p.harvestedAt || "") > (lastSeen || "")).length,
@@ -1050,6 +1082,33 @@ export default function App() {
     setChatFor({ paper });
   }
 
+  // hand the conversation to a full assistant, carrying the paper link
+  // and the question that was asked right beforehand
+  async function continueIn(provider) {
+    if (!chatFor) return;
+    const paper = chatFor.paper;
+    const ax = arxivIdOf(paper);
+    const link = paper.pdf || (ax ? `https://arxiv.org/pdf/${ax}` : paper.url || "");
+    const lastUser = [...(chats[paper.id] || [])].reverse().find((m) => m.role === "user");
+    const prompt =
+      `I'm reading this paper: "${paper.title}"` +
+      (link ? `\nPaper PDF/link: ${link}` : "") +
+      (lastUser ? `\nMy question: ${lastUser.text}` : "\nHelp me understand it in depth.");
+    try {
+      await navigator.clipboard.writeText(prompt);
+    } catch {}
+    const q = encodeURIComponent(prompt);
+    const urls = {
+      chatgpt: `https://chatgpt.com/?q=${q}`,
+      claude: `https://claude.ai/new?q=${q}`,
+      gemini: "https://gemini.google.com/app", // no prefill support — clipboard carries it
+    };
+    window.open(urls[provider], "_blank");
+    showToast(
+      provider === "gemini" ? "Prompt copied — paste it into Gemini" : "Prompt copied & prefilled"
+    );
+  }
+
   // EXPLAIN / QUESTIONS from the reader's selection menu
   async function handlePaperAI(mode, paper, selection) {
     setChatDraft("");
@@ -1453,13 +1512,20 @@ export default function App() {
 
       {tab === "stack" && settings.uiMode === "feed" && (
         <div className="chiprow" role="group" aria-label="Sort feed">
-          {["relevance", "newest", "year"].map((m) => (
+          {[
+            ["relevance", "RELEVANCE"],
+            ...(activeCategory === "all" ? [["papers", "PAPERS FIRST"]] : []),
+            ["newest", "NEWEST"],
+            ["year", "YEAR"],
+            ["source", "SOURCE"],
+            ["title", "A–Z"],
+          ].map(([m, label]) => (
             <button
               key={m}
               className={`chip${sortMode === m ? " on" : ""}`}
               onClick={() => updateSettings({ sortMode: m })}
             >
-              {m.toUpperCase()}
+              {label}
             </button>
           ))}
         </div>
@@ -1526,15 +1592,30 @@ export default function App() {
 
       {tab === "saved" && (
         <main>
-          {Object.keys(saved).length === 0 ? (
+          {savedList.length > 1 && (
+            <div className="chiprow" role="group" aria-label="Sort saved">
+              {[
+                ["recent", "RECENT"],
+                ["year", "YEAR"],
+                ["title", "A–Z"],
+              ].map(([m, label]) => (
+                <button
+                  key={m}
+                  className={`chip${savedSort === m ? " on" : ""}`}
+                  onClick={() => updateSettings({ savedSort: m })}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          )}
+          {savedList.length === 0 ? (
             <div className="empty">
               <div className="big">Nothing saved yet</div>
               Papers you save appear here on every device.
             </div>
           ) : (
-            Object.values(saved)
-              .sort((a, b) => (b.savedAt || "").localeCompare(a.savedAt || ""))
-              .map((p) => (
+            savedList.map((p) => (
                 <div className="row" key={p.id}>
                   <div className="grow">
                     <div className="title">{p.title}</div>
@@ -1854,6 +1935,25 @@ export default function App() {
             </p>
           </div>
           <div className="field">
+            <label>AI assistant</label>
+            {aiStatus === null ? (
+              <p className="hint">Checking…</p>
+            ) : aiStatus.ok ? (
+              <p className="hint">
+                Status: <span style={{ color: "var(--teal)" }}>ready</span> — answers by{" "}
+                {aiStatus.provider === "claude" ? "Claude" : "Gemini (free tier)"}. Powers “Why?”,
+                EXPLAIN, QUESTIONS and the paper chat.
+              </p>
+            ) : (
+              <p className="hint">
+                Status: <span style={{ color: "var(--red)" }}>not configured</span>
+                {aiStatus.offline ? " (couldn't reach the server)" : ""}. To enable for free: get a
+                key at aistudio.google.com/apikey → Vercel → spinstack-app → Settings →
+                Environment Variables → add <b>GEMINI_API_KEY</b> → Redeploy.
+              </p>
+            )}
+          </div>
+          <div className="field">
             <label>Reader</label>
             <input
               className="input"
@@ -2009,6 +2109,18 @@ export default function App() {
                 ))}
               </div>
             )}
+            <div className="continue-row">
+              <span className="continue-lbl">CONTINUE IN</span>
+              <button className="chip" onClick={() => continueIn("chatgpt")}>
+                ChatGPT
+              </button>
+              <button className="chip" onClick={() => continueIn("gemini")}>
+                Gemini
+              </button>
+              <button className="chip" onClick={() => continueIn("claude")}>
+                Claude
+              </button>
+            </div>
             <form
               className="chat-input"
               onSubmit={(e) => {

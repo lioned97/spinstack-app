@@ -5,6 +5,15 @@
 import { complete } from "./_llm.js";
 
 export default async function handler(req, res) {
+  // GET = health check: which provider would answer? (names only, no secrets)
+  if (req.method === "GET") {
+    const provider = process.env.ANTHROPIC_API_KEY
+      ? "claude"
+      : process.env.GEMINI_API_KEY
+        ? "gemini"
+        : null;
+    return res.status(200).json({ ok: !!provider, provider });
+  }
   if (req.method !== "POST") {
     console.error("paper-chat:", `method ${req.method} not allowed`);
     return res.status(405).json({ error: "POST only" });

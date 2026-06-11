@@ -407,6 +407,12 @@ textarea.input { font: inherit; resize: vertical; line-height: 1.5; }
   text-align: left; white-space: normal; line-height: 1.4;
   color: var(--teal); border-color: var(--teal-border); padding: 7px 11px;
 }
+.continue-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.continue-lbl {
+  font-family: var(--mono); font-size: 9.5px; color: var(--dim);
+  letter-spacing: 0.08em;
+}
+.continue-row .chip { color: var(--teal); }
 .chat-input { display: flex; gap: 8px; }
 .chat-input .btn { flex: 0 0 auto; }
 
