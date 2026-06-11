@@ -255,15 +255,20 @@ export default function App() {
   const [saved, setSaved] = useState(() => sGet("ss2_saved", {}));
   const [skipped, setSkipped] = useState(() => sGet("ss2_skipped", {}));
   const [topics, setTopics] = useState(() =>
-    sGet(
-      "ss2_topics",
-      DEFAULT_TOPICS.science.map((name, i) => ({
+    sGet("ss2_topics", [
+      ...DEFAULT_TOPICS.science.map((name, i) => ({
         id: `d${i}`,
         name,
         category: "science",
         addedAt: nowISO(),
-      }))
-    )
+      })),
+      ...DEFAULT_TOPICS.travel.map((name, i) => ({
+        id: `dt${i}`,
+        name,
+        category: "travel",
+        addedAt: nowISO(),
+      })),
+    ])
   );
   const [affinity, setAffinity] = useState(() => sGet("ss2_affinity", { topics: {}, authors: {} }));
   const [analyses, setAnalyses] = useState(() => sGet("ss2_analyses", {}));
@@ -326,6 +331,33 @@ export default function App() {
     mq.addEventListener("change", apply);
     return () => mq.removeEventListener("change", apply);
   }, [theme]);
+
+  // ── one-time travel topic seeding (C0) ──
+  // Existing profiles predate the travel defaults; add the missing ones
+  // once so the harvester (which reads ss2_topics from Supabase) starts
+  // firing Wikivoyage/Wikipedia. Guarded by a settings flag so deleting
+  // them later sticks.
+  useEffect(() => {
+    if (settings.travelSeeded) return;
+    const have = new Set(topics.map((t) => t.name.toLowerCase()));
+    const missing = DEFAULT_TOPICS.travel.filter((d) => !have.has(d.toLowerCase()));
+    if (missing.length) {
+      const nt = [
+        ...topics,
+        ...missing.map((name, i) => ({
+          id: `t${Date.now()}-${i}`,
+          name,
+          category: "travel",
+          addedAt: nowISO(),
+          updatedAt: nowISO(),
+        })),
+      ];
+      setTopics(nt);
+      persist("ss2_topics", nt);
+    }
+    updateSettings({ travelSeeded: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // ── feed loading ──
   async function loadFeed(showStatus = true) {
