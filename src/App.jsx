@@ -16,7 +16,6 @@ import {
   EyeOff,
   Pencil,
   BookOpen,
-  Landmark,
   MessageCircle,
   Send,
   Paperclip,
@@ -27,6 +26,7 @@ import {
 } from "lucide-react";
 import { sGet, persist, onSyncStatus } from "./sync.js";
 import { savePdf, loadPdf } from "./pdfstore.js";
+import PaperCard from "./PaperCard.jsx";
 
 // pdf.js / leaflet ride in their own chunks — loaded on first use
 const Reader = React.lazy(() => import("./Reader.jsx"));
@@ -69,14 +69,6 @@ const CATEGORY_ANCHORS = {
     "hamiltonian engineering": 1.25,
   },
   travel: {},
-};
-
-// Layout switch per category so Phase C+ can add categories without
-// forking PaperCard: dip = ODMR relevance dip, thumb = closed-state
-// thumbnail, carousel = open-state image carousel.
-const CATEGORY_LAYOUTS = {
-  science: { dip: true, thumb: false, carousel: false },
-  travel: { dip: false, thumb: true, carousel: true },
 };
 
 const THEME_COLORS = { dark: "#0a0e12", light: "#f4f6f8" };
@@ -272,27 +264,6 @@ function scoreCard(paper, topics, affinity) {
     if (text.includes("experiment")) score += 0.15;
   }
   return score;
-}
-
-// ── the signature: relevance as an ODMR dip ────────────────
-// Deeper dip = stronger resonance = more relevant. Score ~[0.3, 4+]
-// maps to dip depth 10–95%.
-function OdmrDip({ score }) {
-  const depth = Math.max(0.1, Math.min(0.95, (score - 0.3) / 3.7));
-  const yBase = 5;
-  const yDip = yBase + depth * 16;
-  const d = `M0 ${yBase} L34 ${yBase} C 42 ${yBase}, 44 ${yDip}, 50 ${yDip} C 56 ${yDip}, 58 ${yBase}, 66 ${yBase} L100 ${yBase}`;
-  return (
-    <div className="odmr" aria-label={`Relevance ${score.toFixed(2)}`}>
-      <svg viewBox="0 0 100 26" preserveAspectRatio="none">
-        <path d={d} stroke="var(--red)" strokeWidth="1.6" fill="none" vectorEffect="non-scaling-stroke" />
-        <line x1="0" y1={yBase} x2="100" y2={yBase} stroke="var(--line)" strokeWidth="0.5" />
-      </svg>
-      <div className="lbl">
-        RELEVANCE <b>{score.toFixed(2)}</b>
-      </div>
-    </div>
-  );
 }
 
 // ── main component ─────────────────────────────────────────
@@ -1252,164 +1223,29 @@ export default function App() {
     persist("ss2_last_seen", iso);
   }
 
-  // ── card renderer (shared by feed + deck) ──
-  function PaperCard({ p, deck = false, eager = false, style }) {
-    const isNew = (p.harvestedAt || "") > (lastSeen || "");
-    const an = analyses[p.id];
-    const open = !!expanded[p.id];
-    const cat = catOf(p);
-    const layout = CATEGORY_LAYOUTS[cat] || CATEGORY_LAYOUTS.science;
-    const imgs = (p.images || []).filter(Boolean);
-    const score = p._score ?? scoreCard(p, visibleTopics, affinity);
-
-    // figure extraction (once per device): eagerly for the top of the feed
-    // and the deck card so closed cards show figures too, lazily on "More"
-    // for the rest
-    useEffect(() => {
-      if ((open || eager) && cat === "science" && !p.figures && !p.figuresTried && arxivIdOf(p)) {
-        loadFigures(p);
-      }
-      // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [open, eager]);
-    return (
-      <article className={`card${deck && drag.active ? " dragging" : ""}`} style={style}>
-        <div className="eyebrow">
-          <span className="src">
-            {cat === "science"
-              ? p.source || p.venue || "paper"
-              : `${cat} · ${p.source || p.venue || ""}`}
-          </span>
-          <span>{p.year}</span>
-          {cat === "science" && p.venue && String(p.venue).toLowerCase() !== String(p.source || "").toLowerCase() && (
-            <span>· {String(p.venue).slice(0, 36)}</span>
-          )}
-          {isNew && <span style={{ color: "var(--red)" }}>· NEW</span>}
-        </div>
-        {layout.thumb && imgs.length > 0 && !open ? (
-          <div className="thumbrow">
-            <img className="thumb" src={imgs[0]} loading="lazy" alt="" />
-            <h2>{p.title}</h2>
-          </div>
-        ) : (
-          <h2>{p.title}</h2>
-        )}
-        {(p.authors || []).length > 0 && (
-          <div className="authors">
-            {(p.authors || []).slice(0, 4).join(", ")}
-            {(p.authors || []).length > 4 ? " et al." : ""}
-          </div>
-        )}
-        {open && layout.carousel && imgs.length > 0 && (
-          <div className="carousel">
-            {imgs.slice(0, 5).map((src) => (
-              <img key={src} src={src} loading="lazy" alt="" />
-            ))}
-          </div>
-        )}
-        {cat === "science" && (p.figures || []).length > 0 && (
-          <div className="figrow">
-            {p.figures.slice(0, open ? 3 : 2).map((src, i) => (
-              <img key={i} src={src} loading="lazy" alt={`Figure ${i + 1}`} onClick={() => setLightbox(src)} />
-            ))}
-          </div>
-        )}
-        {p.summary ? (
-          <p className="summary">{p.summary}</p>
-        ) : (
-          <p className="abstract">{(p.abstract || "").slice(0, open ? 4000 : 220)}{!open && (p.abstract || "").length > 220 ? "…" : ""}</p>
-        )}
-        {open && p.summary && p.abstract && <p className="abstract">{p.abstract}</p>}
-        {(p.methods || []).length > 0 && (
-          <div className="chips">
-            {p.methods.slice(0, 5).map((m) => (
-              <span key={m} className="chip method">
-                {m}
-              </span>
-            ))}
-          </div>
-        )}
-        {layout.dip ? (
-          <OdmrDip score={score} />
-        ) : (
-          <div className="match-lbl">
-            MATCH <b>{score.toFixed(2)}</b>
-          </div>
-        )}
-        {an && open && (
-          <div className="analysis">
-            <span className="tag">Why this matters · Claude</span>
-            {an.text}
-          </div>
-        )}
-        <div className="actions">
-          {!deck && (
-            <>
-              <button className="btn skip" onClick={() => verdict(p, false)}>
-                <X size={15} style={{ verticalAlign: "-3px" }} /> Skip
-              </button>
-              <button className="btn save" onClick={() => verdict(p, true)}>
-                <Heart size={15} style={{ verticalAlign: "-3px" }} /> Save
-              </button>
-            </>
-          )}
-          <button
-            className="btn ghost"
-            disabled={analyzingId === p.id}
-            onClick={() => (open && an ? setExpanded((x) => ({ ...x, [p.id]: false })) : analyze(p))}
-            title="Why this matters for my research"
-          >
-            <Sparkles size={15} style={{ verticalAlign: "-3px" }} />{" "}
-            {analyzingId === p.id ? "…" : an && open ? "Hide" : "Why?"}
-          </button>
-          {!open && (p.abstract || "").length > 220 && !an && (
-            <button className="btn ghost" onClick={() => setExpanded((x) => ({ ...x, [p.id]: true }))}>
-              More
-            </button>
-          )}
-          {canRead(p) ? (
-            <button className="btn ghost" onClick={() => openReader(p)} title="Read PDF" aria-label="Read PDF">
-              <BookOpen size={15} style={{ verticalAlign: "-3px" }} />
-            </button>
-          ) : (
-            <>
-              {settings.libraryProxy && p.url && (
-                <button
-                  className="btn ghost"
-                  onClick={() => {
-                    window.open(settings.libraryProxy + encodeURIComponent(p.url), "_blank");
-                    showToast("Opening via library proxy");
-                  }}
-                  title="Open via library"
-                  aria-label="Open via library"
-                >
-                  <Landmark size={15} style={{ verticalAlign: "-3px" }} />
-                </button>
-              )}
-              <button
-                className="btn ghost"
-                onClick={() => pickPdfFor(p)}
-                title="Attach a PDF file for the reader"
-                aria-label="Attach PDF"
-              >
-                <Paperclip size={15} style={{ verticalAlign: "-3px" }} />
-              </button>
-            </>
-          )}
-          <button className="btn ghost" onClick={() => openChat(p)} title="Chat about this paper" aria-label="Chat about this paper">
-            <MessageCircle size={15} style={{ verticalAlign: "-3px" }} />
-          </button>
-          <button className="btn ghost" onClick={() => share(p)} title="Share" aria-label="Share">
-            <Share2 size={15} style={{ verticalAlign: "-3px" }} />
-          </button>
-          {p.url && (
-            <a className="btn ghost" href={p.url} target="_blank" rel="noreferrer" title="Open paper">
-              <ExternalLink size={15} style={{ verticalAlign: "-3px" }} />
-            </a>
-          )}
-        </div>
-      </article>
-    );
-  }
+  // ── shared props for the module-level PaperCard ──
+  const cardProps = {
+    drag,
+    lastSeen,
+    analyses,
+    expanded,
+    analyzingId,
+    settings,
+    canRead,
+    onVerdict: verdict,
+    onAnalyze: analyze,
+    onToggleExpanded: (id, value) => setExpanded((x) => ({ ...x, [id]: value })),
+    onOpenReader: openReader,
+    onPickPdf: pickPdfFor,
+    onOpenProxy: (p) => {
+      window.open(settings.libraryProxy + encodeURIComponent(p.url), "_blank");
+      showToast("Opening via library proxy");
+    },
+    onChat: openChat,
+    onShare: share,
+    onSetLightbox: setLightbox,
+    onLoadFigures: loadFigures,
+  };
 
   // ── views ──
   const deckPaper = filteredTriage[deckIndex];
@@ -1541,7 +1377,9 @@ export default function App() {
               <div style={{ marginTop: 16 }}>{rerunButton}</div>
             </div>
           ) : (
-            feedList.slice(0, 60).map((p, i) => <PaperCard key={p.id} p={p} eager={i < 6} />)
+            feedList.slice(0, 60).map((p, i) => (
+              <PaperCard key={p.id} p={p} eager={i < 6} {...cardProps} />
+            ))
           )}
         </main>
       )}
@@ -1571,6 +1409,7 @@ export default function App() {
                   p={deckPaper}
                   deck
                   eager
+                  {...cardProps}
                   style={{
                     transform: `translateX(${drag.x}px) rotate(${drag.x / 24}deg)`,
                     opacity: 1 - Math.min(0.5, Math.abs(drag.x) / 400),
