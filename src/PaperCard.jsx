@@ -72,7 +72,7 @@ export default function PaperCard({
   onShare,
   onSetLightbox,
   onLoadFigures,
-  onGraph,
+  onRelated,
 }) {
   const isNew = (p.harvestedAt || "") > (lastSeen || "");
   const an = analyses[p.id];
@@ -229,8 +229,8 @@ export default function PaperCard({
             </button>
           </>
         )}
-        {cat === "science" && onGraph && (
-          <button className="btn ghost" onClick={() => onGraph(p)} title="Connections graph" aria-label="Connections graph">
+        {cat === "science" && onRelated && (
+          <button className="btn ghost" onClick={() => onRelated(p)} title="Related papers" aria-label="Related papers">
             <Network size={15} style={{ verticalAlign: "-3px" }} />
           </button>
         )}

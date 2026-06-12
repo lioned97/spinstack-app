@@ -25,15 +25,15 @@ import {
   Map as MapIcon,
   Filter as FilterIcon,
   MoreHorizontal,
+  ArrowLeft,
 } from "lucide-react";
 import { sGet, persist, onSyncStatus } from "./sync.js";
 import { savePdf, loadPdf } from "./pdfstore.js";
 import PaperCard from "./PaperCard.jsx";
 
-// pdf.js / leaflet / graph ride in their own chunks — loaded on first use
+// pdf.js / leaflet ride in their own chunks — loaded on first use
 const Reader = React.lazy(() => import("./Reader.jsx"));
 const MapView = React.lazy(() => import("./MapView.jsx"));
-const GraphView = React.lazy(() => import("./GraphView.jsx"));
 
 const HARVEST_URL =
   "https://raw.githubusercontent.com/lioned97/spinstack-harvest/main/papers/latest.json";
@@ -83,6 +83,7 @@ const SOURCE_LABELS = {
   openalex: "OpenAlex",
   "openalex-live": "OpenAlex (live)",
   pubmed: "PubMed",
+  journal: "Journal feeds",
   wikivoyage: "Wikivoyage",
   wikipedia: "Wikipedia",
   rss: "RSS feeds",
@@ -243,6 +244,88 @@ async function fetchWiki(topicName, src) {
     .filter(Boolean);
 }
 
+// arXiv Atom (via our /api/arxiv CORS middleman) → item schema
+function parseArxivAtom(xmlText) {
+  const out = [];
+  try {
+    const doc = new DOMParser().parseFromString(xmlText, "application/xml");
+    for (const e of doc.querySelectorAll("entry")) {
+      const rawId = (e.querySelector("id")?.textContent || "").split("/").pop() || "";
+      const baseId = rawId.replace(/v\d+$/, "");
+      if (!baseId) continue;
+      const title = (e.querySelector("title")?.textContent || "").replace(/\s+/g, " ").trim();
+      const published = e.querySelector("published")?.textContent || "";
+      out.push({
+        id: `arxiv:${baseId}`,
+        arxivId: rawId,
+        title,
+        abstract: (e.querySelector("summary")?.textContent || "").replace(/\s+/g, " ").trim(),
+        authors: [...e.querySelectorAll("author > name")].map((n) => n.textContent).filter(Boolean),
+        year: parseInt(published.slice(0, 4), 10) || null,
+        venue: "arXiv",
+        url: `https://arxiv.org/abs/${rawId}`,
+        pdf: `https://arxiv.org/pdf/${rawId}`,
+        source: "arxiv",
+        harvestedAt: nowISO(),
+      });
+    }
+  } catch {}
+  return out;
+}
+
+// the search string a topic actually uses: name + optional extra keywords
+const topicQuery = (t) => (t.keywords ? `${t.name} ${t.keywords}` : t.name).trim();
+
+// Live science search across arXiv + Semantic Scholar + OpenAlex in
+// parallel, honouring the topic's per-source toggles and arXiv category.
+async function fetchScienceTopic(t) {
+  const enabled = (s) => !t.sources || t.sources.length === 0 || t.sources.includes(s);
+  const q = topicQuery(t);
+  const jobs = [];
+  if (enabled("arxiv")) {
+    jobs.push(
+      fetch(
+        `/api/arxiv?q=${encodeURIComponent(q)}${t.arxivCat ? `&cat=${encodeURIComponent(t.arxivCat)}` : ""}&max=10`
+      )
+        .then((r) => (r.ok ? r.text() : ""))
+        .then((xml) => ["arxiv", parseArxivAtom(xml)])
+    );
+  }
+  if (enabled("semantic-scholar")) {
+    jobs.push(
+      fetch(
+        `https://api.semanticscholar.org/graph/v1/paper/search?query=${encodeURIComponent(
+          q
+        )}&limit=8&fields=title,abstract,year,venue,authors,externalIds,url,openAccessPdf`
+      )
+        .then((r) => (r.ok ? r.json() : { data: [] }))
+        .then((d) => ["s2", (d.data || []).map(normalizeS2)])
+    );
+  }
+  if (enabled("openalex")) {
+    jobs.push(
+      fetch(
+        `https://api.openalex.org/works?filter=title_and_abstract.search:${encodeURIComponent(
+          q
+        )}&per_page=12&sort=publication_year:desc`
+      )
+        .then((r) => (r.ok ? r.json() : { results: [] }))
+        .then((d) => ["openalex", (d.results || []).map(normalizeOpenAlex)])
+    );
+  }
+  const settled = await Promise.allSettled(jobs);
+  const items = [];
+  const counts = { arxiv: 0, s2: 0, openalex: 0 };
+  for (const r of settled) {
+    if (r.status !== "fulfilled") continue;
+    const [tag, list] = r.value;
+    const ok = list.filter((p) => p && qualityFilter(p));
+    counts[tag] = ok.length;
+    items.push(...ok);
+  }
+  return { items, counts };
+}
+
 function qualityFilter(p) {
   if (!p || !p.id || !p.title) return false;
   if (catOf(p) === "travel") {
@@ -326,9 +409,8 @@ export default function App() {
   const [rowMenu, setRowMenu] = useState(null); // saved-row ⋯ popover (P7c)
   const [showAiHelp, setShowAiHelp] = useState(false);
   const [showMap, setShowMap] = useState(false); // travel places map overlay
-  const [related, setRelated] = useState({}); // {paperId: {loading, items}} — session cache
   const [aiStatus, setAiStatus] = useState(null); // {ok, provider} from /api/paper-chat health
-  const [graphFocus, setGraphFocus] = useState(null); // paper id the graph centres on
+  const [relatedView, setRelatedView] = useState(null); // {paper, loading, items} overlay
   const [settings, setSettings] = useState(() =>
     sGet("ss2_settings", {
       uiMode: "feed",
@@ -353,7 +435,7 @@ export default function App() {
     (sGet("ss2_settings", {}).travelFeeds || []).join("\n")
   );
   const [editingTopicId, setEditingTopicId] = useState(null);
-  const [editName, setEditName] = useState("");
+  const [editDraft, setEditDraft] = useState({ name: "", keywords: "", arxivCat: "", sources: [] });
   const [sharePaper, setSharePaper] = useState(null);
   const [deckIndex, setDeckIndex] = useState(0);
   const [drag, setDrag] = useState({ x: 0, active: false });
@@ -500,23 +582,12 @@ export default function App() {
           await sleep(300);
           continue;
         }
-        // OpenAlex + S2 in parallel; one gap per topic covers the S2 limit
-        const [oa, s2] = await Promise.allSettled([
-          fetch(
-            `https://api.openalex.org/works?filter=title_and_abstract.search:${encodeURIComponent(
-              t.name
-            )}&per_page=12&sort=publication_year:desc`
-          ).then((r) => (r.ok ? r.json() : { results: [] })),
-          fetch(
-            `https://api.semanticscholar.org/graph/v1/paper/search?query=${encodeURIComponent(
-              t.name
-            )}&limit=8&fields=title,abstract,year,venue,authors,externalIds,url,openAccessPdf`
-          ).then((r) => (r.ok ? r.json() : { data: [] })),
-        ]);
-        fresh.push(
-          ...((oa.value && oa.value.results) || []).map(normalizeOpenAlex).filter(qualityFilter)
-        );
-        fresh.push(...((s2.value && s2.value.data) || []).map(normalizeS2).filter(qualityFilter));
+        // arXiv + OpenAlex + S2 in parallel (honours the topic's source
+        // toggles / category / keywords); one gap per topic covers S2
+        try {
+          const { items } = await fetchScienceTopic(t);
+          fresh.push(...items);
+        } catch {}
         await sleep(350);
       }
       // re-fetch the harvest feed too
@@ -719,40 +790,38 @@ export default function App() {
       .sort((a, b) => b._score - a._score);
   }
 
-  // related papers (#4): top 5 in the saved row
-  async function toggleRelated(p) {
-    if (related[p.id]) {
-      setRelated((r) => {
-        const next = { ...r };
-        delete next[p.id];
-        return next;
-      });
-      return;
-    }
-    if (!s2IdOf(p)) return showToast("No DOI/arXiv id — can't look up related papers");
-    setRelated((r) => ({ ...r, [p.id]: { loading: true, items: [] } }));
-    try {
-      const top = (await fetchS2Related(p)).slice(0, 5);
-      setRelated((r) => ({ ...r, [p.id]: { loading: false, items: top } }));
-      if (top.length === 0) showToast("No related papers found");
-    } catch {
-      setRelated((r) => {
-        const next = { ...r };
-        delete next[p.id];
-        return next;
-      });
-      showToast("Related lookup failed (rate limit?) — try again in a minute");
-    }
-  }
+  // related-papers overlay (Issue 2): a normal feed, filtered to papers
+  // connected to the focus paper — S2 citations/references + pool papers
+  // sharing >= 2 topics. No graph, no SVG.
+  const topicNamesIn = (paper, topicList) => {
+    const text = `${paper.title} ${paper.abstract || ""}`.toLowerCase();
+    return topicList.filter((t) => text.includes(t.name.toLowerCase())).map((t) => t.name);
+  };
 
-  function addToPool(x) {
-    setPool((prev) => {
-      if (prev.some((q) => q.id === x.id)) return prev;
-      const merged = [{ ...x, harvestedAt: nowISO() }, ...prev];
-      localStorage.setItem("ss2_pool", JSON.stringify(merged));
-      return merged;
-    });
-    showToast("Added to your feed");
+  async function openRelated(p) {
+    setRelatedView({ paper: p, loading: true, items: [] });
+    const mine = new Set(topicNamesIn(p, visibleTopics));
+    const locals =
+      mine.size >= 2
+        ? pool.filter(
+            (x) =>
+              x.id !== p.id &&
+              topicNamesIn(x, visibleTopics).filter((n) => mine.has(n)).length >= 2
+          )
+        : [];
+    let s2 = [];
+    try {
+      s2 = await fetchS2Related(p);
+    } catch {}
+    const byId = new Map();
+    for (const x of [...s2, ...locals])
+      if (x?.id && x.id !== p.id && !byId.has(x.id)) byId.set(x.id, x);
+    const items = [...byId.values()]
+      .map((x) => ({ ...x, _score: x._score ?? scoreCard(x, visibleTopics, affinity) }))
+      .sort((a, b) => b._score - a._score)
+      .slice(0, 30);
+    setRelatedView({ paper: p, loading: false, items });
+    if (items.length === 0) showToast("No related papers found");
   }
 
   // App-icon badge (where the platform supports it)
@@ -858,31 +927,27 @@ export default function App() {
     setTopics(nt);
     persist("ss2_topics", nt);
     setNewTopic("");
-    showToast(`Tracking “${name}” — fetching…`);
-    // live injection (CORS-safe); daily harvest picks it up too
+    showToast(`Tracking “${name}” — searching…`);
+    // live injection across all engines in parallel; daily harvest follows
     try {
       let fresh = [];
+      let toastMsg;
       if (category === "travel") {
-        for (const src of WIKI_SOURCES) {
-          try {
-            fresh.push(...(await fetchWiki(name, src)).filter(qualityFilter));
-          } catch {}
-        }
+        const results = await Promise.allSettled(WIKI_SOURCES.map((src) => fetchWiki(name, src)));
+        for (const r of results)
+          if (r.status === "fulfilled") fresh.push(...r.value.filter(qualityFilter));
+        toastMsg = `Added ${fresh.length} guides for “${name}”`;
       } else {
-        const url = `https://api.openalex.org/works?filter=title_and_abstract.search:${encodeURIComponent(
-          name
-        )}&per_page=12&sort=publication_year:desc`;
-        const res = await fetch(url);
-        if (!res.ok) throw new Error();
-        const data = await res.json();
-        fresh = (data.results || []).map(normalizeOpenAlex).filter(qualityFilter);
+        const { items, counts } = await fetchScienceTopic({ name });
+        fresh = items;
+        toastMsg = `Added ${fresh.length} papers (${counts.arxiv} arXiv · ${counts.s2} S2 · ${counts.openalex} OpenAlex)`;
       }
       const byId = new Map();
       for (const p of [...fresh, ...pool]) if (p?.id && !byId.has(p.id)) byId.set(p.id, p);
       const merged = [...byId.values()];
       setPool(merged);
       localStorage.setItem("ss2_pool", JSON.stringify(merged));
-      showToast(`Added ${fresh.length} ${category === "travel" ? "guides" : "papers"} for “${name}”`);
+      showToast(toastMsg);
     } catch {
       showToast("Live fetch failed — daily harvest will cover it");
     }
@@ -908,14 +973,28 @@ export default function App() {
     showToast(t.hidden ? `“${t.name}” visible again` : `“${t.name}” hidden from feed`);
   }
 
-  function startRename(t) {
+  function startEdit(t) {
     setEditingTopicId(t.id);
-    setEditName(t.name);
+    setEditDraft({
+      name: t.name,
+      keywords: t.keywords || "",
+      arxivCat: t.arxivCat || "",
+      sources: t.sources || [],
+    });
   }
 
-  function submitRename(e) {
+  function toggleEditSource(s) {
+    setEditDraft((d) => {
+      const all = ["arxiv", "semantic-scholar", "openalex", "pubmed"];
+      const current = d.sources.length ? d.sources : all;
+      const next = current.includes(s) ? current.filter((x) => x !== s) : [...current, s];
+      return { ...d, sources: next.length === 0 || next.length >= all.length ? [] : next };
+    });
+  }
+
+  function submitTopicEdit(e) {
     e.preventDefault();
-    const name = editName.trim();
+    const name = editDraft.name.trim();
     if (!name) return;
     if (
       topics.some(
@@ -924,9 +1003,14 @@ export default function App() {
     ) {
       return showToast("Topic already exists");
     }
-    updateTopic(editingTopicId, { name });
+    updateTopic(editingTopicId, {
+      name,
+      keywords: editDraft.keywords.trim(),
+      arxivCat: editDraft.arxivCat.trim(),
+      sources: editDraft.sources,
+    });
     setEditingTopicId(null);
-    showToast("Topic renamed");
+    showToast("Topic updated — the next harvest uses these settings");
   }
 
   function restoreDefaults(category) {
@@ -1297,10 +1381,7 @@ export default function App() {
     onShare: share,
     onSetLightbox: setLightbox,
     onLoadFigures: loadFigures,
-    onGraph: (p) => {
-      setGraphFocus(p.id);
-      updateSettings({ uiMode: "graph" });
-    },
+    onRelated: openRelated,
   };
 
   // ── views ──
@@ -1337,10 +1418,10 @@ export default function App() {
         <span className="spacer" />
         {tab === "stack" && (
           <div className="mode" role="tablist" aria-label="View mode">
-            {["feed", "swipe", "graph"].map((m) => (
+            {["feed", "swipe"].map((m) => (
               <button
                 key={m}
-                className={settings.uiMode === m ? "on" : ""}
+                className={(settings.uiMode === m || (m === "feed" && settings.uiMode !== "swipe")) ? "on" : ""}
                 onClick={() => updateSettings({ uiMode: m })}
               >
                 {m.toUpperCase()}
@@ -1381,7 +1462,7 @@ export default function App() {
         </div>
       )}
 
-      {tab === "stack" && settings.uiMode !== "graph" && (
+      {tab === "stack" && (
         <div className="toolbar">
           <button
             className={`chip${feedFilter.length || sourceFilter.length ? " on" : ""}`}
@@ -1416,7 +1497,7 @@ export default function App() {
             )}
           </span>
           <span className="spacer" />
-          {settings.uiMode === "feed" && (
+          {settings.uiMode !== "swipe" && (
             <button className="chip" onClick={() => setFilterSheet(true)} aria-label="Sort">
               {(SORT_LABELS[sortMode] || "RELEVANCE")} ▾
             </button>
@@ -1475,7 +1556,7 @@ export default function App() {
         </div>
       )}
 
-      {tab === "stack" && settings.uiMode === "feed" && (
+      {tab === "stack" && settings.uiMode !== "swipe" && (
         <main>
           {loadingFeed && feedList.length === 0 ? (
             Array.from({ length: 3 }).map((_, i) => (
@@ -1497,21 +1578,6 @@ export default function App() {
               <PaperCard key={p.id} p={p} eager={i < 6} {...cardProps} />
             ))
           )}
-        </main>
-      )}
-
-      {tab === "stack" && settings.uiMode === "graph" && (
-        <main className="graph-main">
-          <Suspense fallback={<div className="empty">Loading graph…</div>}>
-            <GraphView
-              pool={pool}
-              topics={visibleTopics}
-              focusId={graphFocus}
-              fetchRelated={fetchS2Related}
-              onVerdict={verdict}
-              showToast={showToast}
-            />
-          </Suspense>
         </main>
       )}
 
@@ -1611,33 +1677,6 @@ export default function App() {
                         {analyses[p.id].text}
                       </div>
                     )}
-                    {related[p.id] && (
-                      <div className="related">
-                        <div className="section-h" style={{ margin: "8px 0 2px" }}>
-                          {related[p.id].loading ? "Finding related papers…" : "Related papers"}
-                        </div>
-                        {related[p.id].items.map((x) => (
-                          <div className="subrow" key={x.id}>
-                            <div className="grow">
-                              <a href={x.url || "#"} target="_blank" rel="noreferrer" className="title">
-                                {x.title}
-                              </a>
-                              <div className="sub">
-                                {x.year} · {String(x.venue || "").slice(0, 36)} · match{" "}
-                                {x._score.toFixed(2)}
-                              </div>
-                            </div>
-                            <button
-                              onClick={() => addToPool(x)}
-                              title="Add to feed"
-                              aria-label={`Add ${x.title} to feed`}
-                            >
-                              <Plus size={15} color="var(--teal)" />
-                            </button>
-                          </div>
-                        ))}
-                      </div>
-                    )}
                   </div>
                   <div className="row-actions">
                     {p.url && (
@@ -1675,7 +1714,7 @@ export default function App() {
                             <button
                               onClick={() => {
                                 setRowMenu(null);
-                                toggleRelated(p);
+                                openRelated(p);
                               }}
                             >
                               Related
@@ -1826,21 +1865,67 @@ export default function App() {
                     <Hash size={14} color="var(--teal)" />
                     <div className="grow">
                       {editingTopicId === t.id ? (
-                        <form onSubmit={submitRename} style={{ display: "flex", gap: 8 }}>
+                        <form onSubmit={submitTopicEdit} className="topic-editor">
                           <input
                             className="input"
-                            value={editName}
-                            onChange={(e) => setEditName(e.target.value)}
+                            value={editDraft.name}
+                            onChange={(e) => setEditDraft((d) => ({ ...d, name: e.target.value }))}
                             autoFocus
+                            placeholder="Topic name"
                             onKeyDown={(e) => e.key === "Escape" && setEditingTopicId(null)}
                           />
-                          <button
-                            className="btn ghost"
-                            type="submit"
-                            style={{ border: "1px solid var(--line)" }}
-                          >
-                            Save
-                          </button>
+                          <input
+                            className="input"
+                            value={editDraft.keywords}
+                            onChange={(e) => setEditDraft((d) => ({ ...d, keywords: e.target.value }))}
+                            placeholder="Extra search keywords (optional)"
+                          />
+                          {catOf(t) === "science" && (
+                            <>
+                              <input
+                                className="input"
+                                value={editDraft.arxivCat}
+                                onChange={(e) => setEditDraft((d) => ({ ...d, arxivCat: e.target.value }))}
+                                placeholder="arXiv category, e.g. quant-ph (optional)"
+                              />
+                              <div className="chips">
+                                {["arxiv", "semantic-scholar", "openalex", "pubmed"].map((s) => {
+                                  const on =
+                                    editDraft.sources.length === 0 || editDraft.sources.includes(s);
+                                  return (
+                                    <button
+                                      type="button"
+                                      key={s}
+                                      className={`chip${on ? " on" : ""}`}
+                                      onClick={() => toggleEditSource(s)}
+                                    >
+                                      {SOURCE_LABELS[s]}
+                                    </button>
+                                  );
+                                })}
+                              </div>
+                              <p className="hint" style={{ margin: 0 }}>
+                                All sources active when all are lit. PubMed runs in the daily
+                                harvest only. The harvester picks these settings up automatically.
+                              </p>
+                            </>
+                          )}
+                          <div style={{ display: "flex", gap: 8 }}>
+                            <button
+                              className="btn ghost"
+                              type="submit"
+                              style={{ border: "1px solid var(--line)" }}
+                            >
+                              Save
+                            </button>
+                            <button
+                              className="btn skip"
+                              type="button"
+                              onClick={() => setEditingTopicId(null)}
+                            >
+                              Cancel
+                            </button>
+                          </div>
                         </form>
                       ) : (
                         <>
@@ -1853,10 +1938,21 @@ export default function App() {
                               learned weight {affinity.topics[t.name.toLowerCase()].toFixed(2)}
                             </div>
                           )}
+                          {(t.arxivCat || t.keywords || (t.sources || []).length > 0) && (
+                            <div className="sub">
+                              {[
+                                t.arxivCat && `cat:${t.arxivCat}`,
+                                t.keywords && `+ ${t.keywords}`,
+                                (t.sources || []).length > 0 && t.sources.map((s) => SOURCE_LABELS[s] || s).join(", "),
+                              ]
+                                .filter(Boolean)
+                                .join(" · ")}
+                            </div>
+                          )}
                         </>
                       )}
                     </div>
-                    <button onClick={() => startRename(t)} title="Rename" aria-label={`Rename ${t.name}`}>
+                    <button onClick={() => startEdit(t)} title="Edit topic" aria-label={`Edit ${t.name}`}>
                       <Pencil size={15} color="var(--dim)" />
                     </button>
                     <button
@@ -2052,6 +2148,38 @@ export default function App() {
           SETUP
         </button>
       </nav>
+
+      {relatedView && (
+        <div className="related-overlay">
+          <header className="reader-hdr">
+            <button onClick={() => setRelatedView(null)} aria-label="Back">
+              <ArrowLeft size={18} color="var(--dim)" />
+            </button>
+            <span className="reader-title" style={{ maxWidth: "75%" }}>
+              Related to: {relatedView.paper.title}
+            </span>
+          </header>
+          <div className="related-scroll">
+            {relatedView.loading ? (
+              Array.from({ length: 3 }).map((_, i) => (
+                <div key={i} className="card shimmer">
+                  <div className="shimmer-line short" />
+                  <div className="shimmer-line" />
+                  <div className="shimmer-line mid" />
+                </div>
+              ))
+            ) : relatedView.items.length === 0 ? (
+              <div className="empty">
+                <div className="big">No related papers found</div>
+                Brand-new papers often aren't indexed by Semantic Scholar yet — try again in a few
+                days.
+              </div>
+            ) : (
+              relatedView.items.map((p) => <PaperCard key={p.id} p={p} {...cardProps} />)
+            )}
+          </div>
+        </div>
+      )}
 
       {readingPaper && (
         <Suspense
