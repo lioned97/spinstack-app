@@ -7,7 +7,7 @@
 // Virtualized: only the current page ±2 get a canvas + text layer.
 // ─────────────────────────────────────────────────────────────
 import React, { useEffect, useRef, useState } from "react";
-import { X, ZoomIn, ZoomOut, PenLine, Eraser, Presentation, Trash2 } from "lucide-react";
+import { X, ZoomIn, ZoomOut, PenLine, Eraser, Presentation, Trash2, MessageCircle, Send } from "lucide-react";
 import * as pdfjsLib from "pdfjs-dist";
 import workerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 
@@ -317,7 +317,27 @@ function PageView({ pdf, num, scale, active, pageW, pageH, annots, onHighlightTa
   );
 }
 
-export default function Reader({ paper, url, annots, onSave, ink, onSaveInk, onClose, onAction, showToast }) {
+export default function Reader({
+  paper,
+  url,
+  annots,
+  onSave,
+  ink,
+  onSaveInk,
+  onClose,
+  onAction,
+  showToast,
+  // in-reader chat (P1): state lives in App, panel renders here so the
+  // PDF stays visible above it
+  chats = [],
+  chatBusy = false,
+  chatDraft = "",
+  chatFor = null,
+  onSendChat,
+  onChatDraftChange,
+  onOpenChat,
+  onContinueIn,
+}) {
   const [pdf, setPdf] = useState(null);
   const [numPages, setNumPages] = useState(0);
   const [base, setBase] = useState(null); // page size at scale 1
@@ -328,7 +348,16 @@ export default function Reader({ paper, url, annots, onSave, ink, onSaveInk, onC
   const [tool, setTool] = useState(null); // null | "pen" | "eraser"
   const [colorIdx, setColorIdx] = useState(0);
   const [board, setBoard] = useState(false); // whiteboard overlay
+  const [chatOpen, setChatOpen] = useState(false);
+  const [continueOpen, setContinueOpen] = useState(false);
+  const chatMsgsRef = useRef(null);
   const scrollRef = useRef(null);
+
+  // keep the panel scrolled to the newest message
+  useEffect(() => {
+    const el = chatMsgsRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [chats, chatBusy, chatOpen]);
   const live = (annots || []).filter((a) => !a.deleted);
   const liveInk = (ink || []).filter((s) => !s.deleted);
   const boardInk = liveInk.filter((s) => s.page === "board");
@@ -413,8 +442,12 @@ export default function Reader({ paper, url, annots, onSave, ink, onSaveInk, onC
         if (!ctx) return setMenu(null);
         const rect = range.getBoundingClientRect();
         setMenu({
+          // desktop: pill floats above the selection. Touch devices get a
+          // bottom sheet instead — the OS copy/paste toolbar owns the space
+          // above the selection and would cover the pill.
           x: Math.min(window.innerWidth - 150, Math.max(150, rect.left + rect.width / 2)),
-          y: Math.max(8, rect.top - 48),
+          y: Math.max(8, rect.top - 52),
+          mobile: window.matchMedia("(pointer: coarse)").matches,
           page: parseInt(tl.dataset.page, 10),
           ...ctx,
         });
@@ -454,7 +487,13 @@ export default function Reader({ paper, url, annots, onSave, ink, onSaveInk, onC
     if (!menu) return;
     const selection = menu.quote;
     clearSelection();
+    setChatOpen(true); // answer lands in the in-reader panel, PDF stays visible
     onAction(mode, { selection });
+  }
+
+  function toggleChat() {
+    if (!chatOpen && onOpenChat) onOpenChat();
+    setChatOpen((v) => !v);
   }
 
   const sheetAnnot = sheet ? live.find((a) => a.id === sheet.annotId) : null;
@@ -521,6 +560,16 @@ export default function Reader({ paper, url, annots, onSave, ink, onSaveInk, onC
         <button onClick={() => setBoard(true)} aria-label="Whiteboard" title="Whiteboard">
           <Presentation size={17} color={boardInk.length ? "var(--teal)" : "var(--dim)"} />
         </button>
+        <button
+          onClick={toggleChat}
+          aria-label="Paper chat"
+          title="Chat about this paper"
+          className={chatOpen ? "tool-on" : ""}
+          style={{ position: "relative" }}
+        >
+          <MessageCircle size={17} color={chatOpen ? "var(--teal)" : "var(--dim)"} />
+          {chats.length > 0 && <span className="icon-dot" />}
+        </button>
         <button onClick={() => setZoom((z) => Math.max(0.5, +(z - 0.15).toFixed(2)))} aria-label="Zoom out">
           <ZoomOut size={17} color="var(--dim)" />
         </button>
@@ -556,6 +605,81 @@ export default function Reader({ paper, url, annots, onSave, ink, onSaveInk, onC
           ))}
       </div>
 
+      <div className={`reader-chat${chatOpen ? "" : " hidden"}`}>
+        <div className="reader-chat-head">
+          <span className="section-h" style={{ margin: 0 }}>
+            Paper chat
+          </span>
+          <span className="spacer" />
+          <button onClick={() => setChatOpen(false)} aria-label="Close chat panel">
+            <X size={16} color="var(--dim)" />
+          </button>
+        </div>
+        <div className="chat-msgs" ref={chatMsgsRef}>
+          {chats.length === 0 && !chatBusy && (
+            <p className="hint">
+              Select text in the paper and tap EXPLAIN or QUESTIONS — or just ask below.
+            </p>
+          )}
+          {chats.map((m, i) => (
+            <div key={`${m.at}-${i}`} className={`bubble ${m.role}`}>
+              {m.text}
+            </div>
+          ))}
+          {chatBusy && <div className="bubble assistant">…</div>}
+        </div>
+        {(chatFor?.questions || []).length > 0 && (
+          <div className="chips">
+            {chatFor.questions.map((q) => (
+              <button key={q} className="chip qchip" onClick={() => onSendChat(q)}>
+                {q}
+              </button>
+            ))}
+          </div>
+        )}
+        <div className="continue-row">
+          <button className="chip" onClick={() => setContinueOpen((v) => !v)}>
+            {continueOpen ? "▴" : "▾"} Continue in…
+          </button>
+          {continueOpen && (
+            <>
+              <button className="chip" onClick={() => onContinueIn("chatgpt")}>
+                ChatGPT
+              </button>
+              <button className="chip" onClick={() => onContinueIn("gemini")}>
+                Gemini
+              </button>
+              <button className="chip" onClick={() => onContinueIn("claude")}>
+                Claude
+              </button>
+            </>
+          )}
+        </div>
+        <form
+          className="chat-input"
+          onSubmit={(e) => {
+            e.preventDefault();
+            onSendChat(chatDraft);
+          }}
+        >
+          <input
+            className="input"
+            placeholder="Ask about this paper…"
+            value={chatDraft}
+            onChange={(e) => onChatDraftChange(e.target.value)}
+          />
+          <button
+            className="btn ghost"
+            type="submit"
+            disabled={chatBusy || !chatDraft.trim()}
+            aria-label="Send"
+            style={{ border: "1px solid var(--line)" }}
+          >
+            <Send size={15} />
+          </button>
+        </form>
+      </div>
+
       {board && (
         <BoardOverlay
           paper={paper}
@@ -567,12 +691,36 @@ export default function Reader({ paper, url, annots, onSave, ink, onSaveInk, onC
         />
       )}
 
-      {menu && (
+      {menu && !menu.mobile && (
         <div className="selmenu" style={{ left: menu.x, top: menu.y }}>
           <button onClick={() => aiAction("explain")}>EXPLAIN</button>
           <button onClick={() => aiAction("questions")}>QUESTIONS</button>
           <button onClick={() => addAnnotation(true)}>NOTE</button>
           <button onClick={() => addAnnotation(false)}>HIGHLIGHT</button>
+        </div>
+      )}
+      {menu && menu.mobile && (
+        <div className="sel-sheet-overlay" onClick={clearSelection}>
+          <div className="sel-sheet" onClick={(e) => e.stopPropagation()}>
+            <p className="hint" style={{ margin: "0 0 8px" }}>
+              “{menu.quote.slice(0, 120)}
+              {menu.quote.length > 120 ? "…" : ""}”
+            </p>
+            <div className="actions">
+              <button className="btn ghost" onClick={() => aiAction("explain")}>
+                Explain
+              </button>
+              <button className="btn ghost" onClick={() => aiAction("questions")}>
+                Questions
+              </button>
+              <button className="btn ghost" onClick={() => addAnnotation(true)}>
+                Note
+              </button>
+              <button className="btn ghost" onClick={() => addAnnotation(false)}>
+                Highlight
+              </button>
+            </div>
+          </div>
         </div>
       )}
 

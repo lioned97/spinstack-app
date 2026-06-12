@@ -18,6 +18,21 @@ MIN_PX = 200
 MAX_WIDTH = 900
 
 
+def find_caption(page_blocks, rect):
+    """Nearest text block starting just below the image box (<= 80px)."""
+    if rect is None:
+        return ""
+    best, best_gap = "", 81
+    for b in page_blocks:
+        x0, y0, x1, y1, text = b[0], b[1], b[2], b[3], b[4]
+        if len(b) > 6 and b[6] != 0:  # not a text block
+            continue
+        gap = y0 - rect.y1
+        if 0 <= gap < best_gap and x1 > rect.x0 and x0 < rect.x1:
+            best, best_gap = " ".join(str(text).split())[:300], gap
+    return best
+
+
 def extract_figures(arxiv_id):
     req = Request(
         f"https://arxiv.org/pdf/{arxiv_id}",
@@ -27,6 +42,7 @@ def extract_figures(arxiv_id):
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     candidates, seen = [], set()
     for page in doc:
+        page_blocks = None
         for img in page.get_images(full=True):
             xref = img[0]
             if xref in seen:
@@ -39,11 +55,20 @@ def extract_figures(arxiv_id):
             w, h, data = info["width"], info["height"], info["image"]
             if len(data) < MIN_BYTES or min(w, h) < MIN_PX:
                 continue  # logos, rules, inline math renders
-            candidates.append((w * h, data))
+            caption = ""
+            try:
+                rects = page.get_image_rects(xref)
+                if rects:
+                    if page_blocks is None:
+                        page_blocks = page.get_text("blocks")
+                    caption = find_caption(page_blocks, rects[0])
+            except Exception:
+                pass
+            candidates.append((w * h, data, caption))
     candidates.sort(key=lambda t: -t[0])
 
     figures = []
-    for _, data in candidates[:3]:
+    for _, data, caption in candidates[:3]:
         try:
             pix = fitz.Pixmap(data)
             if pix.alpha:
@@ -53,7 +78,10 @@ def extract_figures(arxiv_id):
             while pix.width > MAX_WIDTH:
                 pix.shrink(1)
             jpg = pix.tobytes("jpeg", jpg_quality=70)
-            figures.append("data:image/jpeg;base64," + base64.b64encode(jpg).decode())
+            figures.append({
+                "dataUrl": "data:image/jpeg;base64," + base64.b64encode(jpg).decode(),
+                "caption": caption,
+            })
         except Exception as e:
             print(f"figures: convert failed: {e}")
     return figures

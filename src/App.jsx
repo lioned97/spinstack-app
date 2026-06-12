@@ -23,14 +23,17 @@ import {
   Network,
   Plus,
   Map as MapIcon,
+  Filter as FilterIcon,
+  MoreHorizontal,
 } from "lucide-react";
 import { sGet, persist, onSyncStatus } from "./sync.js";
 import { savePdf, loadPdf } from "./pdfstore.js";
 import PaperCard from "./PaperCard.jsx";
 
-// pdf.js / leaflet ride in their own chunks — loaded on first use
+// pdf.js / leaflet / graph ride in their own chunks — loaded on first use
 const Reader = React.lazy(() => import("./Reader.jsx"));
 const MapView = React.lazy(() => import("./MapView.jsx"));
+const GraphView = React.lazy(() => import("./GraphView.jsx"));
 
 const HARVEST_URL =
   "https://raw.githubusercontent.com/lioned97/spinstack-harvest/main/papers/latest.json";
@@ -72,6 +75,27 @@ const CATEGORY_ANCHORS = {
 };
 
 const THEME_COLORS = { dark: "#0a0e12", light: "#f4f6f8" };
+
+const SOURCE_LABELS = {
+  arxiv: "arXiv",
+  "semantic-scholar": "Semantic Scholar",
+  "s2-live": "Semantic Scholar (live)",
+  openalex: "OpenAlex",
+  "openalex-live": "OpenAlex (live)",
+  pubmed: "PubMed",
+  wikivoyage: "Wikivoyage",
+  wikipedia: "Wikipedia",
+  rss: "RSS feeds",
+};
+
+const SORT_LABELS = {
+  relevance: "RELEVANCE",
+  papers: "PAPERS FIRST",
+  newest: "NEWEST",
+  year: "YEAR",
+  source: "SOURCE",
+  title: "A–Z",
+};
 
 // ── helpers ────────────────────────────────────────────────
 
@@ -296,10 +320,15 @@ export default function App() {
   const [chatFor, setChatFor] = useState(null); // {paper, selection?, questions?: []}
   const [chatBusy, setChatBusy] = useState(false);
   const [chatDraft, setChatDraft] = useState("");
-  const [lightbox, setLightbox] = useState(null); // dataURL of full-screen figure
+  const [lightbox, setLightbox] = useState(null); // {dataUrl, caption} of full-screen figure
+  const [filterSheet, setFilterSheet] = useState(false); // collapsed filter/sort sheet (P7b)
+  const [sourcePop, setSourcePop] = useState(false); // sources popover (P3b)
+  const [rowMenu, setRowMenu] = useState(null); // saved-row ⋯ popover (P7c)
+  const [showAiHelp, setShowAiHelp] = useState(false);
   const [showMap, setShowMap] = useState(false); // travel places map overlay
   const [related, setRelated] = useState({}); // {paperId: {loading, items}} — session cache
   const [aiStatus, setAiStatus] = useState(null); // {ok, provider} from /api/paper-chat health
+  const [graphFocus, setGraphFocus] = useState(null); // paper id the graph centres on
   const [settings, setSettings] = useState(() =>
     sGet("ss2_settings", {
       uiMode: "feed",
@@ -350,10 +379,11 @@ export default function App() {
 
   useEffect(() => onSyncStatus(setSyncStatus), []);
 
+  const toastTimer = useRef(null);
   const showToast = (msg) => {
     setToast(msg);
-    clearTimeout(showToast.t);
-    showToast.t = setTimeout(() => setToast(""), 2500);
+    clearTimeout(toastTimer.current);
+    toastTimer.current = setTimeout(() => setToast(""), 2500);
   };
 
   function updateSettings(patch) {
@@ -461,38 +491,33 @@ export default function App() {
       const fresh = [];
       for (const t of topics.filter((x) => !x.deleted && !x.hidden)) {
         if (catOf(t) === "travel") {
-          for (const src of WIKI_SOURCES) {
-            try {
-              fresh.push(...(await fetchWiki(t.name, src)).filter(qualityFilter));
-            } catch {}
-            await sleep(300);
-          }
+          // both wikis in parallel — different hosts, no shared rate limit
+          const results = await Promise.allSettled(
+            WIKI_SOURCES.map((src) => fetchWiki(t.name, src))
+          );
+          for (const r of results)
+            if (r.status === "fulfilled") fresh.push(...r.value.filter(qualityFilter));
+          await sleep(300);
           continue;
         }
-        try {
-          const res = await fetch(
+        // OpenAlex + S2 in parallel; one gap per topic covers the S2 limit
+        const [oa, s2] = await Promise.allSettled([
+          fetch(
             `https://api.openalex.org/works?filter=title_and_abstract.search:${encodeURIComponent(
               t.name
             )}&per_page=12&sort=publication_year:desc`
-          );
-          if (res.ok) {
-            const data = await res.json();
-            fresh.push(...(data.results || []).map(normalizeOpenAlex).filter(qualityFilter));
-          }
-        } catch {}
-        await sleep(300);
-        try {
-          const res = await fetch(
+          ).then((r) => (r.ok ? r.json() : { results: [] })),
+          fetch(
             `https://api.semanticscholar.org/graph/v1/paper/search?query=${encodeURIComponent(
               t.name
             )}&limit=8&fields=title,abstract,year,venue,authors,externalIds,url,openAccessPdf`
-          );
-          if (res.ok) {
-            const data = await res.json();
-            fresh.push(...(data.data || []).map(normalizeS2).filter(qualityFilter));
-          }
-        } catch {}
-        await sleep(300);
+          ).then((r) => (r.ok ? r.json() : { data: [] })),
+        ]);
+        fresh.push(
+          ...((oa.value && oa.value.results) || []).map(normalizeOpenAlex).filter(qualityFilter)
+        );
+        fresh.push(...((s2.value && s2.value.data) || []).map(normalizeS2).filter(qualityFilter));
+        await sleep(350);
       }
       // re-fetch the harvest feed too
       try {
@@ -555,14 +580,33 @@ export default function App() {
     return (settings.feedFilter || []).filter((n) => names.has(n.toLowerCase()));
   }, [settings.feedFilter, chipTopics]);
 
+  const sourceFilter = settings.sourceFilter || [];
   const filteredTriage = useMemo(() => {
-    if (feedFilter.length === 0) return categoryTriage;
+    let list = categoryTriage;
+    if (sourceFilter.length) list = list.filter((p) => sourceFilter.includes(p.source));
+    if (feedFilter.length === 0) return list;
     const wanted = feedFilter.map((n) => n.toLowerCase());
-    return categoryTriage.filter((p) => {
+    return list.filter((p) => {
       const text = `${p.title} ${p.abstract || ""}`.toLowerCase();
       return wanted.some((n) => text.includes(n));
     });
-  }, [categoryTriage, feedFilter]);
+  }, [categoryTriage, feedFilter, sourceFilter]);
+
+  // sources present in the pool (P3b)
+  const poolSources = useMemo(
+    () => [...new Set(pool.map((p) => p.source).filter(Boolean))].sort(),
+    [pool]
+  );
+
+  function toggleSource(s) {
+    const all = poolSources;
+    const current = sourceFilter.length ? sourceFilter : all;
+    const next = current.includes(s) ? current.filter((x) => x !== s) : [...current, s];
+    // everything checked = no filter; never allow an empty set (= show nothing)
+    updateSettings({
+      sourceFilter: next.length === 0 || next.length >= all.length ? [] : next,
+    });
+  }
 
   // feed sort (A3): deck always uses relevance (filteredTriage order)
   const sortMode = settings.sortMode || "relevance";
@@ -590,15 +634,17 @@ export default function App() {
     return filteredTriage;
   }, [filteredTriage, sortMode]);
 
-  // saved list sorting
+  // saved list: category filter (P3a) + sorting
   const savedSort = settings.savedSort || "recent";
+  const savedCategory = settings.savedCategory || "all";
   const savedList = useMemo(() => {
-    const list = Object.values(saved);
+    let list = Object.values(saved);
+    if (savedCategory !== "all") list = list.filter((p) => catOf(p) === savedCategory);
     if (savedSort === "year") return list.sort((a, b) => (b.year || 0) - (a.year || 0));
     if (savedSort === "title")
       return list.sort((a, b) => String(a.title).localeCompare(String(b.title)));
     return list.sort((a, b) => (b.savedAt || "").localeCompare(a.savedAt || ""));
-  }, [saved, savedSort]);
+  }, [saved, savedSort, savedCategory]);
 
   const newCount = useMemo(
     () => triage.filter((p) => (p.harvestedAt || "") > (lastSeen || "")).length,
@@ -641,8 +687,39 @@ export default function App() {
     return { freshCount: fresh.length, top, topicCounts, savedWeek };
   }, [pool, visibleTopics, affinity, saved, skipped]);
 
-  // related papers (#4): Semantic Scholar citations + references,
-  // scored against your profile, top 5
+  // Semantic Scholar citations + references, scored against the profile.
+  // Shared by the saved-row "related" panel and the graph view.
+  async function fetchS2Related(p) {
+    const sid = s2IdOf(p);
+    if (!sid) return [];
+    const fields = "title,abstract,year,venue,authors,externalIds,url,openAccessPdf";
+    const found = [];
+    let okCalls = 0;
+    for (const kind of ["citations", "references"]) {
+      try {
+        const res = await fetch(
+          `https://api.semanticscholar.org/graph/v1/paper/${encodeURIComponent(sid)}/${kind}?limit=30&fields=${fields}`
+        );
+        if (res.ok) {
+          okCalls++;
+          const d = await res.json();
+          for (const row of d.data || []) {
+            const n = normalizeS2(row.citingPaper || row.citedPaper);
+            if (n && qualityFilter(n)) found.push(n);
+          }
+        }
+      } catch {}
+      await new Promise((r2) => setTimeout(r2, 350)); // S2 rate-limit courtesy
+    }
+    if (okCalls === 0) throw new Error("s2 unreachable");
+    const seen = new Set([p.id]);
+    return found
+      .filter((x) => !seen.has(x.id) && seen.add(x.id))
+      .map((x) => ({ ...x, _score: scoreCard(x, visibleTopics, affinity) }))
+      .sort((a, b) => b._score - a._score);
+  }
+
+  // related papers (#4): top 5 in the saved row
   async function toggleRelated(p) {
     if (related[p.id]) {
       setRelated((r) => {
@@ -652,36 +729,10 @@ export default function App() {
       });
       return;
     }
-    const sid = s2IdOf(p);
-    if (!sid) return showToast("No DOI/arXiv id — can't look up related papers");
+    if (!s2IdOf(p)) return showToast("No DOI/arXiv id — can't look up related papers");
     setRelated((r) => ({ ...r, [p.id]: { loading: true, items: [] } }));
     try {
-      const fields = "title,abstract,year,venue,authors,externalIds,url,openAccessPdf";
-      const found = [];
-      let okCalls = 0;
-      for (const kind of ["citations", "references"]) {
-        try {
-          const res = await fetch(
-            `https://api.semanticscholar.org/graph/v1/paper/${encodeURIComponent(sid)}/${kind}?limit=30&fields=${fields}`
-          );
-          if (res.ok) {
-            okCalls++;
-            const d = await res.json();
-            for (const row of d.data || []) {
-              const n = normalizeS2(row.citingPaper || row.citedPaper);
-              if (n && qualityFilter(n)) found.push(n);
-            }
-          }
-        } catch {}
-        await new Promise((r2) => setTimeout(r2, 350)); // S2 rate-limit courtesy
-      }
-      if (okCalls === 0) throw new Error("s2 unreachable");
-      const seen = new Set([p.id]);
-      const top = found
-        .filter((x) => !seen.has(x.id) && seen.add(x.id))
-        .map((x) => ({ ...x, _score: scoreCard(x, visibleTopics, affinity) }))
-        .sort((a, b) => b._score - a._score)
-        .slice(0, 5);
+      const top = (await fetchS2Related(p)).slice(0, 5);
       setRelated((r) => ({ ...r, [p.id]: { loading: false, items: top } }));
       if (top.length === 0) showToast("No related papers found");
     } catch {
@@ -1020,6 +1071,7 @@ export default function App() {
   function closeReader() {
     if (readingPaper?.local) URL.revokeObjectURL(readingPaper.url);
     setReadingPaper(null);
+    setChatFor(null); // reader-panel chat must not pop up as an app overlay
   }
 
   // ── paper chat (C2) ──
@@ -1245,6 +1297,10 @@ export default function App() {
     onShare: share,
     onSetLightbox: setLightbox,
     onLoadFigures: loadFigures,
+    onGraph: (p) => {
+      setGraphFocus(p.id);
+      updateSettings({ uiMode: "graph" });
+    },
   };
 
   // ── views ──
@@ -1273,16 +1329,23 @@ export default function App() {
         <span className="readout">
           {tab} · {filteredTriage.length} queued
         </span>
-        {newCount > 0 && <span className="badge">{newCount} new</span>}
+        {newCount > 0 && (
+          <button className="badge badge-btn" onClick={markAllSeen} title="Mark all seen">
+            {newCount} new — mark seen
+          </button>
+        )}
         <span className="spacer" />
         {tab === "stack" && (
           <div className="mode" role="tablist" aria-label="View mode">
-            <button className={settings.uiMode === "feed" ? "on" : ""} onClick={() => updateSettings({ uiMode: "feed" })}>
-              FEED
-            </button>
-            <button className={settings.uiMode === "swipe" ? "on" : ""} onClick={() => updateSettings({ uiMode: "swipe" })}>
-              SWIPE
-            </button>
+            {["feed", "swipe", "graph"].map((m) => (
+              <button
+                key={m}
+                className={settings.uiMode === m ? "on" : ""}
+                onClick={() => updateSettings({ uiMode: m })}
+              >
+                {m.toUpperCase()}
+              </button>
+            ))}
           </div>
         )}
         <button onClick={() => loadFeed(true)} title="Refresh feed" aria-label="Refresh feed">
@@ -1290,14 +1353,6 @@ export default function App() {
         </button>
         <span className={`sync-dot ${syncStatus}`} title={`Sync: ${syncStatus}`} />
       </header>
-
-      {tab === "stack" && newCount > 0 && (
-        <div className="deck-meta">
-          <button onClick={markAllSeen} style={{ color: "var(--teal)" }}>
-            mark all seen
-          </button>
-        </div>
-      )}
 
       {tab === "stack" && (
         <div className="catbar">
@@ -1326,50 +1381,111 @@ export default function App() {
         </div>
       )}
 
-      {tab === "stack" && chipTopics.length > 0 && (
-        <div className="chiprow" role="group" aria-label="Filter by topic">
+      {tab === "stack" && settings.uiMode !== "graph" && (
+        <div className="toolbar">
           <button
-            className={`chip${feedFilter.length === 0 ? " on" : ""}`}
-            onClick={() => updateSettings({ feedFilter: [] })}
+            className={`chip${feedFilter.length || sourceFilter.length ? " on" : ""}`}
+            onClick={() => setFilterSheet(true)}
+            aria-label="Filter and sort"
           >
-            ALL
+            <FilterIcon size={11} style={{ verticalAlign: "-1px" }} /> FILTER
+            {feedFilter.length + (sourceFilter.length ? 1 : 0) > 0 &&
+              ` · ${feedFilter.length + (sourceFilter.length ? 1 : 0)}`}
           </button>
-          {chipTopics.map((t) => (
+          <span style={{ position: "relative" }}>
             <button
-              key={t.id}
-              className={`chip${feedFilter.some((n) => n.toLowerCase() === t.name.toLowerCase()) ? " on" : ""}`}
-              onClick={() => toggleFeedFilter(t.name)}
+              className={`chip${sourceFilter.length ? " on" : ""}`}
+              onClick={() => setSourcePop((v) => !v)}
+              aria-label="Filter by source"
             >
-              {t.name}
+              ⊞ SOURCES
             </button>
-          ))}
+            {sourcePop && (
+              <div className="source-popover">
+                {poolSources.map((s) => (
+                  <label key={s}>
+                    <input
+                      type="checkbox"
+                      checked={!sourceFilter.length || sourceFilter.includes(s)}
+                      onChange={() => toggleSource(s)}
+                    />
+                    {SOURCE_LABELS[s] || s}
+                  </label>
+                ))}
+              </div>
+            )}
+          </span>
+          <span className="spacer" />
+          {settings.uiMode === "feed" && (
+            <button className="chip" onClick={() => setFilterSheet(true)} aria-label="Sort">
+              {(SORT_LABELS[sortMode] || "RELEVANCE")} ▾
+            </button>
+          )}
         </div>
       )}
 
-      {tab === "stack" && settings.uiMode === "feed" && (
-        <div className="chiprow" role="group" aria-label="Sort feed">
-          {[
-            ["relevance", "RELEVANCE"],
-            ...(activeCategory === "all" ? [["papers", "PAPERS FIRST"]] : []),
-            ["newest", "NEWEST"],
-            ["year", "YEAR"],
-            ["source", "SOURCE"],
-            ["title", "A–Z"],
-          ].map(([m, label]) => (
-            <button
-              key={m}
-              className={`chip${sortMode === m ? " on" : ""}`}
-              onClick={() => updateSettings({ sortMode: m })}
-            >
-              {label}
+      {filterSheet && (
+        <div className="share-overlay" onClick={() => setFilterSheet(false)}>
+          <div className="share-sheet" onClick={(e) => e.stopPropagation()}>
+            <div className="section-h" style={{ margin: 0 }}>
+              Filter by topic
+            </div>
+            <div className="chips">
+              <button
+                className={`chip${feedFilter.length === 0 ? " on" : ""}`}
+                onClick={() => updateSettings({ feedFilter: [] })}
+              >
+                ALL
+              </button>
+              {chipTopics.map((t) => (
+                <button
+                  key={t.id}
+                  className={`chip${feedFilter.some((n) => n.toLowerCase() === t.name.toLowerCase()) ? " on" : ""}`}
+                  onClick={() => toggleFeedFilter(t.name)}
+                >
+                  {t.name}
+                </button>
+              ))}
+            </div>
+            <div className="section-h" style={{ margin: "8px 0 0" }}>
+              Sort by
+            </div>
+            <div className="chips">
+              {[
+                ["relevance", "RELEVANCE"],
+                ...(activeCategory === "all" ? [["papers", "PAPERS FIRST"]] : []),
+                ["newest", "NEWEST"],
+                ["year", "YEAR"],
+                ["source", "SOURCE"],
+                ["title", "A–Z"],
+              ].map(([m, label]) => (
+                <button
+                  key={m}
+                  className={`chip${sortMode === m ? " on" : ""}`}
+                  onClick={() => updateSettings({ sortMode: m })}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+            <button className="btn skip" onClick={() => setFilterSheet(false)}>
+              Done
             </button>
-          ))}
+          </div>
         </div>
       )}
 
       {tab === "stack" && settings.uiMode === "feed" && (
         <main>
-          {feedList.length === 0 ? (
+          {loadingFeed && feedList.length === 0 ? (
+            Array.from({ length: 3 }).map((_, i) => (
+              <div key={i} className="card shimmer">
+                <div className="shimmer-line short" />
+                <div className="shimmer-line" />
+                <div className="shimmer-line mid" />
+              </div>
+            ))
+          ) : feedList.length === 0 ? (
             <div className="empty">
               <div className="big">Queue clear</div>
               The harvester runs daily at 06:00 UTC. Tap ↻ to refresh, or re-run the search across
@@ -1381,6 +1497,21 @@ export default function App() {
               <PaperCard key={p.id} p={p} eager={i < 6} {...cardProps} />
             ))
           )}
+        </main>
+      )}
+
+      {tab === "stack" && settings.uiMode === "graph" && (
+        <main className="graph-main">
+          <Suspense fallback={<div className="empty">Loading graph…</div>}>
+            <GraphView
+              pool={pool}
+              topics={visibleTopics}
+              focusId={graphFocus}
+              fetchRelated={fetchS2Related}
+              onVerdict={verdict}
+              showToast={showToast}
+            />
+          </Suspense>
         </main>
       )}
 
@@ -1431,6 +1562,19 @@ export default function App() {
 
       {tab === "saved" && (
         <main>
+          {Object.keys(saved).length > 0 && (
+            <div className="chiprow" role="group" aria-label="Saved category">
+              {["all", ...CATEGORIES].map((c) => (
+                <button
+                  key={c}
+                  className={`chip${savedCategory === c ? " on" : ""}`}
+                  onClick={() => updateSettings({ savedCategory: c })}
+                >
+                  {c.toUpperCase()}
+                </button>
+              ))}
+            </div>
+          )}
           {savedList.length > 1 && (
             <div className="chiprow" role="group" aria-label="Sort saved">
               {[
@@ -1495,49 +1639,68 @@ export default function App() {
                       </div>
                     )}
                   </div>
-                  <button
-                    onClick={() =>
-                      analyses[p.id]
-                        ? setExpanded((x) => ({ ...x, [p.id]: !x[p.id] }))
-                        : analyze(p)
-                    }
-                    title="Why this matters"
-                    aria-label="Analyze"
-                  >
-                    <Sparkles size={16} color={analyzingId === p.id ? "var(--teal)" : "var(--dim)"} />
-                  </button>
-                  {catOf(p) === "science" && (
-                    <button
-                      onClick={() => toggleRelated(p)}
-                      title="Related papers"
-                      aria-label="Related papers"
-                    >
-                      <Network size={16} color={related[p.id] ? "var(--teal)" : "var(--dim)"} />
+                  <div className="row-actions">
+                    {p.url && (
+                      <a href={p.url} target="_blank" rel="noreferrer" aria-label="Open paper">
+                        <ExternalLink size={16} color="var(--dim)" />
+                      </a>
+                    )}
+                    <button onClick={() => openChat(p)} title="Chat" aria-label="Chat about this paper">
+                      <MessageCircle size={16} color="var(--dim)" />
                     </button>
-                  )}
-                  {canRead(p) ? (
-                    <button onClick={() => openReader(p)} title="Read PDF" aria-label="Read PDF">
-                      <BookOpen size={16} color="var(--dim)" />
+                    <button onClick={() => unsave(p.id)} title="Remove" aria-label="Remove">
+                      <Trash2 size={16} color="var(--dim)" />
                     </button>
-                  ) : (
-                    <button onClick={() => pickPdfFor(p)} title="Attach PDF" aria-label="Attach PDF">
-                      <Paperclip size={16} color="var(--dim)" />
-                    </button>
-                  )}
-                  <button onClick={() => openChat(p)} title="Chat" aria-label="Chat about this paper">
-                    <MessageCircle size={16} color="var(--dim)" />
-                  </button>
-                  <button onClick={() => share(p)} title="Share" aria-label="Share">
-                    <Share2 size={16} color="var(--dim)" />
-                  </button>
-                  {p.url && (
-                    <a href={p.url} target="_blank" rel="noreferrer" aria-label="Open paper">
-                      <ExternalLink size={16} color="var(--dim)" />
-                    </a>
-                  )}
-                  <button onClick={() => unsave(p.id)} title="Remove" aria-label="Remove">
-                    <Trash2 size={16} color="var(--dim)" />
-                  </button>
+                    <span style={{ position: "relative" }}>
+                      <button
+                        onClick={() => setRowMenu(rowMenu === p.id ? null : p.id)}
+                        title="More actions"
+                        aria-label="More actions"
+                      >
+                        <MoreHorizontal size={16} color={rowMenu === p.id ? "var(--teal)" : "var(--dim)"} />
+                      </button>
+                      {rowMenu === p.id && (
+                        <div className="row-popover">
+                          <button
+                            onClick={() => {
+                              setRowMenu(null);
+                              analyses[p.id]
+                                ? setExpanded((x) => ({ ...x, [p.id]: !x[p.id] }))
+                                : analyze(p);
+                            }}
+                          >
+                            Why?
+                          </button>
+                          {catOf(p) === "science" && (
+                            <button
+                              onClick={() => {
+                                setRowMenu(null);
+                                toggleRelated(p);
+                              }}
+                            >
+                              Related
+                            </button>
+                          )}
+                          <button
+                            onClick={() => {
+                              setRowMenu(null);
+                              canRead(p) ? openReader(p) : pickPdfFor(p);
+                            }}
+                          >
+                            {canRead(p) ? "Read" : "Attach PDF"}
+                          </button>
+                          <button
+                            onClick={() => {
+                              setRowMenu(null);
+                              share(p);
+                            }}
+                          >
+                            Share
+                          </button>
+                        </div>
+                      )}
+                    </span>
+                  </div>
                 </div>
               ))
           )}
@@ -1775,20 +1938,22 @@ export default function App() {
           </div>
           <div className="field">
             <label>AI assistant</label>
-            {aiStatus === null ? (
-              <p className="hint">Checking…</p>
-            ) : aiStatus.ok ? (
+            <div className="ai-status-pill">
+              <span className={`dot ${aiStatus?.ok ? "synced" : "error"}`} />
+              {aiStatus === null
+                ? "Checking…"
+                : aiStatus.ok
+                  ? `Ready · ${aiStatus.provider === "claude" ? "Claude Haiku" : "Gemini Flash"}`
+                  : "Not configured"}
+              {aiStatus && !aiStatus.ok && (
+                <button onClick={() => setShowAiHelp((v) => !v)}>▾ Setup</button>
+              )}
+            </div>
+            {showAiHelp && (
               <p className="hint">
-                Status: <span style={{ color: "var(--teal)" }}>ready</span> — answers by{" "}
-                {aiStatus.provider === "claude" ? "Claude" : "Gemini (free tier)"}. Powers “Why?”,
-                EXPLAIN, QUESTIONS and the paper chat.
-              </p>
-            ) : (
-              <p className="hint">
-                Status: <span style={{ color: "var(--red)" }}>not configured</span>
-                {aiStatus.offline ? " (couldn't reach the server)" : ""}. To enable for free: get a
-                key at aistudio.google.com/apikey → Vercel → spinstack-app → Settings →
-                Environment Variables → add <b>GEMINI_API_KEY</b> → Redeploy.
+                Free setup: get a key at aistudio.google.com/apikey → Vercel → spinstack-app →
+                Settings → Environment Variables → add <b>GEMINI_API_KEY</b> → Redeploy. Powers
+                “Why?”, EXPLAIN, QUESTIONS and the paper chat.
               </p>
             )}
           </div>
@@ -1807,6 +1972,13 @@ export default function App() {
               placeholder="Library proxy prefix, e.g. https://ezproxy.huji.ac.il/login?url="
               value={settings.libraryProxy || ""}
               onChange={(e) => updateSettings({ libraryProxy: e.target.value.trim() })}
+              style={{ marginBottom: 8 }}
+            />
+            <input
+              className="input"
+              placeholder="Proxy button label, e.g. HUJI"
+              value={settings.proxyLabel || ""}
+              onChange={(e) => updateSettings({ proxyLabel: e.target.value.trim() })}
             />
             <p className="hint">
               Email unlocks Unpaywall open-access PDF lookup for DOI papers. The library proxy
@@ -1899,6 +2071,14 @@ export default function App() {
             onClose={closeReader}
             onAction={(mode, { selection }) => handlePaperAI(mode, readingPaper.paper, selection)}
             showToast={showToast}
+            chats={chats[readingPaper.paper.id] || []}
+            chatBusy={chatBusy}
+            chatDraft={chatDraft}
+            chatFor={chatFor}
+            onSendChat={sendChat}
+            onChatDraftChange={setChatDraft}
+            onOpenChat={() => setChatFor((c) => c || { paper: readingPaper.paper })}
+            onContinueIn={continueIn}
           />
         </Suspense>
       )}
@@ -1915,7 +2095,7 @@ export default function App() {
         </Suspense>
       )}
 
-      {chatFor && (
+      {chatFor && !readingPaper && (
         <div className="share-overlay chat-overlay" onClick={() => setChatFor(null)}>
           <div className="share-sheet chat-sheet" onClick={(e) => e.stopPropagation()}>
             <div className="section-h" style={{ margin: 0 }}>
@@ -1989,7 +2169,8 @@ export default function App() {
 
       {lightbox && (
         <div className="lightbox" onClick={() => setLightbox(null)}>
-          <img src={lightbox} alt="Figure" />
+          <img src={lightbox.dataUrl || lightbox} alt="Figure" />
+          {lightbox.caption && <p className="lightbox-caption">{lightbox.caption}</p>}
         </div>
       )}
 

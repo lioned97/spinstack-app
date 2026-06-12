@@ -15,7 +15,10 @@ import {
   MessageCircle,
   Share2,
   ExternalLink,
+  Network,
 } from "lucide-react";
+
+import { isPaywalled } from "./publisherUtils.js";
 
 const catOf = (x) => (x && x.category) || "science";
 
@@ -69,6 +72,7 @@ export default function PaperCard({
   onShare,
   onSetLightbox,
   onLoadFigures,
+  onGraph,
 }) {
   const isNew = (p.harvestedAt || "") > (lastSeen || "");
   const an = analyses[p.id];
@@ -125,9 +129,19 @@ export default function PaperCard({
       )}
       {cat === "science" && (p.figures || []).length > 0 && (
         <div className="figrow">
-          {p.figures.slice(0, open ? 3 : 2).map((src, i) => (
-            <img key={i} src={src} loading="lazy" alt={`Figure ${i + 1}`} onClick={() => onSetLightbox(src)} />
-          ))}
+          {p.figures
+            .slice(0, open ? 3 : 2)
+            // tolerate both formats: old cache = dataURL string, new = {dataUrl, caption}
+            .map((f) => (typeof f === "string" ? { dataUrl: f, caption: "" } : f))
+            .map((f, i) => (
+              <img
+                key={i}
+                src={f.dataUrl}
+                loading="lazy"
+                alt={f.caption || `Figure ${i + 1}`}
+                onClick={() => onSetLightbox(f)}
+              />
+            ))}
         </div>
       )}
       {p.summary ? (
@@ -187,6 +201,12 @@ export default function PaperCard({
           <button className="btn ghost" onClick={() => onOpenReader(p)} title="Read PDF" aria-label="Read PDF">
             <BookOpen size={15} style={{ verticalAlign: "-3px" }} />
           </button>
+        ) : settings.libraryProxy && p.url && isPaywalled(p) ? (
+          // paywalled publisher + proxy configured → primary CTA, not a ghost icon
+          <button className="btn proxy-btn" onClick={() => onOpenProxy(p)}>
+            <Landmark size={15} style={{ verticalAlign: "-3px" }} />{" "}
+            {settings.proxyLabel ? `Open via ${settings.proxyLabel}` : "Open via library"}
+          </button>
         ) : (
           <>
             {settings.libraryProxy && p.url && (
@@ -208,6 +228,11 @@ export default function PaperCard({
               <Paperclip size={15} style={{ verticalAlign: "-3px" }} />
             </button>
           </>
+        )}
+        {cat === "science" && onGraph && (
+          <button className="btn ghost" onClick={() => onGraph(p)} title="Connections graph" aria-label="Connections graph">
+            <Network size={15} style={{ verticalAlign: "-3px" }} />
+          </button>
         )}
         <button className="btn ghost" onClick={() => onChat(p)} title="Chat about this paper" aria-label="Chat about this paper">
           <MessageCircle size={15} style={{ verticalAlign: "-3px" }} />
