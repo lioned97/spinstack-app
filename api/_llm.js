@@ -4,6 +4,15 @@
 // Provider order: ANTHROPIC_API_KEY (Claude) → GEMINI_API_KEY (free
 // tier, same key the harvester uses) → throw. Lets the app run fully
 // free when no Anthropic key is configured.
+//
+// A message may carry an optional `image` (a data URL like
+// "data:image/jpeg;base64,…") for vision tasks — both providers below
+// handle it.
+
+function splitDataUrl(dataUrl) {
+  const m = /^data:([^;]+);base64,(.*)$/s.exec(dataUrl || "");
+  return m ? { mediaType: m[1], data: m[2] } : null;
+}
 
 export async function complete({ system, messages, maxTokens = 500 }) {
   const anthropicKey = process.env.ANTHROPIC_API_KEY;
@@ -13,7 +22,17 @@ export async function complete({ system, messages, maxTokens = 500 }) {
     const body = {
       model: process.env.ANTHROPIC_MODEL || "claude-haiku-4-5-20251001",
       max_tokens: maxTokens,
-      messages,
+      messages: messages.map((m) => {
+        const img = m.image ? splitDataUrl(m.image) : null;
+        if (!img) return { role: m.role, content: m.content };
+        return {
+          role: m.role,
+          content: [
+            { type: "image", source: { type: "base64", media_type: img.mediaType, data: img.data } },
+            { type: "text", text: m.content },
+          ],
+        };
+      }),
     };
     if (system) body.system = system;
     const r = await fetch("https://api.anthropic.com/v1/messages", {
@@ -36,10 +55,12 @@ export async function complete({ system, messages, maxTokens = 500 }) {
 
   if (geminiKey) {
     const payload = {
-      contents: messages.map((m) => ({
-        role: m.role === "assistant" ? "model" : "user",
-        parts: [{ text: m.content }],
-      })),
+      contents: messages.map((m) => {
+        const parts = [{ text: m.content }];
+        const img = m.image ? splitDataUrl(m.image) : null;
+        if (img) parts.unshift({ inline_data: { mime_type: img.mediaType, data: img.data } });
+        return { role: m.role === "assistant" ? "model" : "user", parts };
+      }),
       generationConfig: { maxOutputTokens: maxTokens, temperature: 0.4 },
     };
     if (system) payload.systemInstruction = { parts: [{ text: system }] };

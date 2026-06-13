@@ -128,19 +128,22 @@ export default function PaperCard({
         </div>
       )}
       {cat === "science" && (p.figures || []).length > 0 && (
-        <div className="figrow">
+        <div className={`figrow${open ? " open" : ""}`}>
           {p.figures
             .slice(0, open ? 3 : 2)
             // tolerate both formats: old cache = dataURL string, new = {dataUrl, caption}
-            .map((f) => (typeof f === "string" ? { dataUrl: f, caption: "" } : f))
-            .map((f, i) => (
-              <img
-                key={i}
-                src={f.dataUrl}
-                loading="lazy"
-                alt={f.caption || `Figure ${i + 1}`}
-                onClick={() => onSetLightbox(f)}
-              />
+            .map((f, i) => [typeof f === "string" ? { dataUrl: f, caption: "" } : f, i])
+            .map(([f, i]) => (
+              <figure key={i} className="figcell" onClick={() => onSetLightbox(f, p, i)}>
+                <img src={f.dataUrl} loading="lazy" alt={f.caption || `Figure ${i + 1}`} />
+                {open && f.caption && (
+                  <figcaption>
+                    {f.aiGenerated && <span className="ai-tag">AI</span>}
+                    {f.caption.slice(0, 160)}
+                    {f.caption.length > 160 ? "…" : ""}
+                  </figcaption>
+                )}
+              </figure>
             ))}
         </div>
       )}

@@ -490,22 +490,24 @@ export default function App() {
     return () => mq.removeEventListener("change", apply);
   }, [theme]);
 
-  // ── one-time travel topic seeding (C0) ──
-  // Existing profiles predate the travel defaults; add the missing ones
-  // once so the harvester (which reads ss2_topics from Supabase) starts
-  // firing Wikivoyage/Wikipedia. Guarded by a settings flag so deleting
-  // them later sticks.
+  // ── one-time default-topic seeding ──
+  // Make ALL built-in defaults (science + travel) visible as real topics
+  // in the row, so the Topics tab always lists them. Tombstoned names are
+  // respected — an explicit delete stays deleted (Restore can revive).
   useEffect(() => {
-    if (settings.travelSeeded) return;
+    if (settings.defaultsSeededV2) return;
     const have = new Set(topics.map((t) => t.name.toLowerCase()));
-    const missing = DEFAULT_TOPICS.travel.filter((d) => !have.has(d.toLowerCase()));
+    const missing = [
+      ...DEFAULT_TOPICS.science.map((name) => ({ name, category: "science" })),
+      ...DEFAULT_TOPICS.travel.map((name) => ({ name, category: "travel" })),
+    ].filter((d) => !have.has(d.name.toLowerCase()));
     if (missing.length) {
       const nt = [
         ...topics,
-        ...missing.map((name, i) => ({
-          id: `t${Date.now()}-${i}`,
-          name,
-          category: "travel",
+        ...missing.map((d, i) => ({
+          id: `seed${Date.now()}-${i}`,
+          name: d.name,
+          category: d.category,
           addedAt: nowISO(),
           updatedAt: nowISO(),
         })),
@@ -513,7 +515,7 @@ export default function App() {
       setTopics(nt);
       persist("ss2_topics", nt);
     }
-    updateSettings({ travelSeeded: true });
+    updateSettings({ defaultsSeededV2: true, travelSeeded: true });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -800,6 +802,7 @@ export default function App() {
 
   async function openRelated(p) {
     setRelatedView({ paper: p, loading: true, items: [] });
+    // pool papers that already share >= 2 of my topics with this one
     const mine = new Set(topicNamesIn(p, visibleTopics));
     const locals =
       mine.size >= 2
@@ -809,17 +812,59 @@ export default function App() {
               topicNamesIn(x, visibleTopics).filter((n) => mine.has(n)).length >= 2
           )
         : [];
-    let s2 = [];
-    try {
-      s2 = await fetchS2Related(p);
-    } catch {}
+
+    // travel papers have no citation graph — stick to local + a wiki pass
+    const isSci = catOf(p) === "science";
+
+    // (a) S2 citations + references, and (b) a NEW live search built by
+    // AI from the paper's topic / methods / main idea (item 4)
+    const jobs = [];
+    if (isSci) jobs.push(fetchS2Related(p).catch(() => []));
+    jobs.push(
+      (async () => {
+        try {
+          const er = await fetch("/api/expand", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              paper: {
+                title: p.title,
+                abstract: p.abstract,
+                methods: p.methods || [],
+              },
+            }),
+          });
+          if (!er.ok) return [];
+          const { queries, arxivCat } = await er.json();
+          const found = [];
+          for (const q of (queries || []).slice(0, 3)) {
+            try {
+              if (isSci) {
+                const { items } = await fetchScienceTopic({ name: q, arxivCat: arxivCat || undefined });
+                found.push(...items);
+              } else {
+                for (const src of WIKI_SOURCES)
+                  found.push(...(await fetchWiki(q, src)).filter(qualityFilter));
+              }
+            } catch {}
+            await new Promise((r) => setTimeout(r, 350));
+          }
+          return found;
+        } catch {
+          return [];
+        }
+      })()
+    );
+    const settled = await Promise.all(jobs);
+    const discovered = settled.flat();
+
     const byId = new Map();
-    for (const x of [...s2, ...locals])
+    for (const x of [...discovered, ...locals])
       if (x?.id && x.id !== p.id && !byId.has(x.id)) byId.set(x.id, x);
     const items = [...byId.values()]
       .map((x) => ({ ...x, _score: x._score ?? scoreCard(x, visibleTopics, affinity) }))
       .sort((a, b) => b._score - a._score)
-      .slice(0, 30);
+      .slice(0, 40);
     setRelatedView({ paper: p, loading: false, items });
     if (items.length === 0) showToast("No related papers found");
   }
@@ -927,8 +972,9 @@ export default function App() {
     setTopics(nt);
     persist("ss2_topics", nt);
     setNewTopic("");
-    showToast(`Tracking “${name}” — searching…`);
-    // live injection across all engines in parallel; daily harvest follows
+    showToast(`Tracking “${name}” — building search…`);
+    // live injection across all engines; AI expands the topic into a
+    // small search strategy first (synonyms, subtopics, arXiv category)
     try {
       let fresh = [];
       let toastMsg;
@@ -938,9 +984,57 @@ export default function App() {
           if (r.status === "fulfilled") fresh.push(...r.value.filter(qualityFilter));
         toastMsg = `Added ${fresh.length} guides for “${name}”`;
       } else {
-        const { items, counts } = await fetchScienceTopic({ name });
-        fresh = items;
-        toastMsg = `Added ${fresh.length} papers (${counts.arxiv} arXiv · ${counts.s2} S2 · ${counts.openalex} OpenAlex)`;
+        let queries = [name];
+        let aiCat = null;
+        let aiUsed = false;
+        try {
+          const er = await fetch("/api/expand", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ topic: name }),
+          });
+          if (er.ok) {
+            const exp = await er.json();
+            const extra = (exp.queries || []).filter(
+              (q) => q.toLowerCase() !== name.toLowerCase()
+            );
+            queries = [name, ...extra].slice(0, 3);
+            aiCat = exp.arxivCat || null;
+            aiUsed = extra.length > 0 || !!aiCat;
+          }
+        } catch {}
+        const totals = { arxiv: 0, s2: 0, openalex: 0 };
+        for (const q of queries) {
+          try {
+            const { items, counts } = await fetchScienceTopic({
+              name: q,
+              arxivCat: aiCat || undefined,
+            });
+            fresh.push(...items);
+            for (const k of Object.keys(totals)) totals[k] += counts[k] || 0;
+          } catch {}
+          await new Promise((r) => setTimeout(r, 350)); // S2 courtesy gap
+        }
+        if (aiCat) {
+          // remember the AI-picked category on the topic — the harvester
+          // will scope its arXiv searches with it from the next run
+          setTopics((prev) => {
+            const nt2 = prev.map((x) =>
+              x.name.toLowerCase() === name.toLowerCase() && !x.deleted
+                ? { ...x, arxivCat: aiCat, updatedAt: nowISO() }
+                : x
+            );
+            persist("ss2_topics", nt2);
+            return nt2;
+          });
+        }
+        const uniq = new Map();
+        for (const p of fresh) if (p?.id && !uniq.has(p.id)) uniq.set(p.id, p);
+        fresh = [...uniq.values()];
+        toastMsg =
+          fresh.length === 0
+            ? `No live results for “${name}” — the daily harvest will keep trying. Tip: edit the topic (pencil) to add keywords.`
+            : `Added ${fresh.length} papers (${totals.arxiv} arXiv · ${totals.s2} S2 · ${totals.openalex} OpenAlex)${aiUsed ? " · AI search" : ""}`;
       }
       const byId = new Map();
       for (const p of [...fresh, ...pool]) if (p?.id && !byId.has(p.id)) byId.set(p.id, p);
@@ -1277,9 +1371,53 @@ export default function App() {
     try {
       const res = await fetch(`/api/figures?arxiv=${encodeURIComponent(ax)}`);
       const d = res.ok ? await res.json() : { figures: [] };
-      stamp({ figures: d.figures || [], figuresTried: true });
+      // normalize to objects so we can attach verified captions later
+      const figs = (d.figures || []).map((f) =>
+        typeof f === "string" ? { dataUrl: f, caption: "" } : f
+      );
+      stamp({ figures: figs, figuresTried: true });
     } catch {
       /* offline or function cold-failed — figuresTried stays set */
+    }
+  }
+
+  // open a figure full-screen; on first open, have the vision model
+  // confirm the scraped caption matches — or write one (item 5). Result
+  // is cached on the pool figure (device-local) so it's checked once.
+  async function openLightbox(fig, paper, idx) {
+    const f = typeof fig === "string" ? { dataUrl: fig, caption: "" } : fig;
+    setLightbox({ ...f, verifying: !f.captionChecked });
+    if (f.captionChecked || !f.dataUrl) return;
+    try {
+      const res = await fetch("/api/figure-caption", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ image: f.dataUrl, caption: f.caption || "" }),
+      });
+      const d = res.ok ? await res.json() : null;
+      const checked = {
+        ...f,
+        caption: d?.caption || f.caption || "",
+        aiGenerated: !!d?.aiGenerated,
+        captionChecked: true,
+      };
+      setLightbox((lb) => (lb && lb.dataUrl === f.dataUrl ? { ...checked, verifying: false } : lb));
+      // cache back onto the pool figure
+      if (paper && Number.isInteger(idx)) {
+        setPool((prev) => {
+          const merged = prev.map((x) => {
+            if (x.id !== paper.id || !Array.isArray(x.figures)) return x;
+            const figs = x.figures.map((g, i) =>
+              i === idx ? { ...(typeof g === "string" ? { dataUrl: g } : g), ...checked } : g
+            );
+            return { ...x, figures: figs };
+          });
+          localStorage.setItem("ss2_pool", JSON.stringify(merged));
+          return merged;
+        });
+      }
+    } catch {
+      setLightbox((lb) => (lb && lb.dataUrl === f.dataUrl ? { ...lb, verifying: false } : lb));
     }
   }
 
@@ -1379,7 +1517,7 @@ export default function App() {
     },
     onChat: openChat,
     onShare: share,
-    onSetLightbox: setLightbox,
+    onSetLightbox: openLightbox,
     onLoadFigures: loadFigures,
     onRelated: openRelated,
   };
@@ -1498,12 +1636,32 @@ export default function App() {
           </span>
           <span className="spacer" />
           {settings.uiMode !== "swipe" && (
-            <button className="chip" onClick={() => setFilterSheet(true)} aria-label="Sort">
-              {(SORT_LABELS[sortMode] || "RELEVANCE")} ▾
+            <button
+              className={`chip${sortMode !== "relevance" ? " on" : ""}`}
+              onClick={() => setFilterSheet(true)}
+              aria-label="Sort"
+            >
+              ⇅ {SORT_LABELS[sortMode] || "RELEVANCE"} ▾
             </button>
           )}
         </div>
       )}
+
+      {tab === "stack" &&
+        (sortMode !== "relevance" || feedFilter.length > 0 || sourceFilter.length > 0) && (
+          <div className="active-readout">
+            <span>Sorted by <b>{SORT_LABELS[sortMode] || "RELEVANCE"}</b></span>
+            {feedFilter.length > 0 && (
+              <span>· Topics: <b>{feedFilter.join(", ")}</b></span>
+            )}
+            {sourceFilter.length > 0 && (
+              <span>· Sources: <b>{sourceFilter.map((s) => SOURCE_LABELS[s] || s).join(", ")}</b></span>
+            )}
+            <button className="clear-link" onClick={() => updateSettings({ sortMode: "relevance", feedFilter: [], sourceFilter: [] })}>
+              clear
+            </button>
+          </div>
+        )}
 
       {filterSheet && (
         <div className="share-overlay" onClick={() => setFilterSheet(false)}>
@@ -2297,8 +2455,15 @@ export default function App() {
 
       {lightbox && (
         <div className="lightbox" onClick={() => setLightbox(null)}>
-          <img src={lightbox.dataUrl || lightbox} alt="Figure" />
-          {lightbox.caption && <p className="lightbox-caption">{lightbox.caption}</p>}
+          <img src={lightbox.dataUrl || lightbox} alt="Figure" onClick={(e) => e.stopPropagation()} />
+          {lightbox.verifying ? (
+            <p className="lightbox-caption dim">Reading the figure…</p>
+          ) : lightbox.caption ? (
+            <p className="lightbox-caption" onClick={(e) => e.stopPropagation()}>
+              {lightbox.aiGenerated && <span className="ai-tag">AI-generated description</span>}
+              {lightbox.caption}
+            </p>
+          ) : null}
         </div>
       )}
 
