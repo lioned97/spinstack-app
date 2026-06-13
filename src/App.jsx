@@ -137,6 +137,53 @@ const nowISO = () => new Date().toISOString();
 
 const catOf = (x) => (x && x.category) || "science";
 
+// Generic words that cause cross-topic false positives in a loose search
+// (e.g. a dentistry paper matching "Cryo-EM structure determination" only
+// because it says "structure determination").
+const GENERIC_TERMS = new Set([
+  "structure", "determination", "analysis", "analyses", "method", "methods",
+  "system", "systems", "dynamics", "model", "models", "study", "studies",
+  "effect", "effects", "property", "properties", "imaging", "detection",
+  "measurement", "measurements", "novel", "using", "based", "approach",
+  "approaches", "characterization", "application", "applications", "review",
+  "theory", "design", "control", "function", "functions", "data", "results",
+  "research", "toward", "towards", "resolution", "performance", "enhanced",
+  "improved", "efficient", "field", "fields", "high", "low", "new", "via",
+]);
+
+// Is a paper genuinely about `topicName`? Pass if the full phrase appears, or
+// if every *significant* token of the topic appears (word-boundary, prefix
+// match so plurals/variants count). This keeps a broad search query — or an
+// AI-expanded sub-query — from dragging in tangential papers that merely
+// share a generic word. Applied only to the loose live engines (OpenAlex/
+// S2/arXiv keyword search), never to curated journal feeds.
+function topicRelevant(text, topicName) {
+  const t = (text || "").toLowerCase();
+  const phrase = String(topicName || "").toLowerCase().trim();
+  if (!phrase) return true;
+  if (t.includes(phrase)) return true;
+  const tokens = phrase.split(/[^a-z0-9]+/).filter((w) => w.length >= 2 && !GENERIC_TERMS.has(w));
+  if (!tokens.length) return false;
+  return tokens.every((w) => {
+    const esc = w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    return new RegExp(`\\b${esc}`, "i").test(t);
+  });
+}
+
+// Self-healing cleanup: drop loosely-matched live-search items (OpenAlex /
+// Semantic Scholar keyword results) that no longer match ANY tracked topic.
+// Only these two sources are pruned — harvested papers, journals, arXiv,
+// travel and uploads are always kept. Runs on each feed load so old
+// off-topic noise (e.g. dentistry papers) clears itself out of the pool.
+function pruneStaleLive(arr, topicNames) {
+  if (!topicNames.length) return arr;
+  return arr.filter((p) => {
+    if (p.source !== "openalex-live" && p.source !== "s2-live") return true;
+    const text = `${p.title} ${p.abstract || ""}`;
+    return topicNames.some((n) => topicRelevant(text, n));
+  });
+}
+
 // Persist the device-local paper pool. Figures are base64 image data —
 // far too big for the ~5MB localStorage quota on mobile, and not needed
 // for the offline feed (they re-fetch on demand), so strip them before
@@ -456,6 +503,9 @@ async function fetchCuratedScience(topicNames, provider, sources) {
       venue: item.venue || "Science source",
       url: item.url,
       doi: item.doi || undefined,
+      // arXiv-first: when the journal paper has an arXiv preprint, the reader
+      // and figure extractor use the open-access arXiv copy
+      arxivId: item.arxivId || undefined,
       images: item.image ? [item.image] : [],
       source: item.sourceId || (item.mediaType === "article" ? "science-news" : "journal"),
       mediaType: item.mediaType || "journal",
@@ -773,7 +823,8 @@ export default function App() {
       if (!res.ok) throw new Error(`feed ${res.status}`);
       const raw = await res.json();
       const incoming = (Array.isArray(raw) ? raw : raw.papers || []).filter(qualityFilter);
-      const merged = clientDedupe([...incoming, ...pool]);
+      const topicNames = topics.filter((x) => !x.deleted).map((x) => x.name);
+      const merged = clientDedupe([...incoming, ...pruneStaleLive(pool, topicNames)]);
       setPool(merged);
       savePool(merged); // device-local cache, not synced
       if (showStatus) showToast(`${merged.length} papers loaded`);
@@ -808,7 +859,8 @@ export default function App() {
         // toggles / category / keywords); one gap per topic covers S2
         try {
           const { items } = await fetchScienceTopic(t);
-          fresh.push(...items);
+          // relevance gate: keep only results genuinely about this topic
+          fresh.push(...items.filter((it) => topicRelevant(`${it.title} ${it.abstract || ""}`, t.name)));
         } catch {}
         await sleep(350);
       }
@@ -1497,7 +1549,10 @@ export default function App() {
               name: q,
               arxivCat: aiCat || undefined,
             });
-            fresh.push(...items);
+            // gate every expanded sub-query's results against the ORIGINAL
+            // topic so synonyms broaden recall without dragging in noise
+            const kept = items.filter((it) => topicRelevant(`${it.title} ${it.abstract || ""}`, name));
+            fresh.push(...kept);
             for (const k of Object.keys(totals)) totals[k] += counts[k] || 0;
           } catch {}
           await new Promise((r) => setTimeout(r, 350)); // S2 courtesy gap

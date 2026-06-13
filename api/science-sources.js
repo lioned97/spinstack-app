@@ -21,6 +21,11 @@ const UA = { "User-Agent": "SpinStack/3.0 (personal research tool)" };
 const STOP_WORDS = new Set([
   "about", "after", "also", "and", "center", "from", "into", "open", "other",
   "research", "system", "systems", "that", "the", "their", "this", "using", "with",
+  // generic research words that cause cross-topic false positives
+  "structure", "determination", "analysis", "method", "methods", "dynamics",
+  "model", "models", "study", "studies", "effect", "effects", "imaging",
+  "detection", "measurement", "novel", "based", "approach", "review", "theory",
+  "design", "control", "data", "results", "resolution", "performance", "field",
 ]);
 
 function decodeEntities(value) {
@@ -162,6 +167,9 @@ async function enrichAbstracts(items) {
       if (!item.authors.length && paper.authors) {
         item.authors = paper.authors.map((author) => author.name).filter(Boolean);
       }
+      // arXiv-first: if the journal paper also has an arXiv preprint, record
+      // its id so the app reads the (open-access) arXiv PDF instead.
+      if (paper.externalIds?.ArXiv) item.arxivId = paper.externalIds.ArXiv;
     });
   } catch (error) {
     console.error("science-sources: Semantic Scholar enrichment failed:", error.message);
@@ -173,11 +181,17 @@ function keywordRelevant(item, topics) {
   const text = `${item.title} ${item.abstract}`.toLowerCase();
   return topics.some((topic) => {
     const phrase = topic.toLowerCase().trim();
-    if (phrase && text.includes(phrase)) return true;
+    if (!phrase) return false;
+    if (text.includes(phrase)) return true;
+    // require EVERY significant token (not just any) so a lone generic word
+    // can't make an off-topic paper "relevant"
     const tokens = phrase
-      .split(/[^a-z0-9-]+/)
-      .filter((token) => token.length >= 4 && !STOP_WORDS.has(token));
-    return tokens.some((token) => text.includes(token));
+      .split(/[^a-z0-9]+/)
+      .filter((token) => token.length >= 2 && !STOP_WORDS.has(token));
+    if (!tokens.length) return false;
+    return tokens.every((token) =>
+      new RegExp(`\\b${token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`).test(text)
+    );
   });
 }
 
