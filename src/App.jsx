@@ -303,7 +303,7 @@ async function fetchTravelTopic(topicName) {
 
 async function fetchCuratedScience(topicNames, provider) {
   if (!topicNames.length) return [];
-  const res = await fetch("/api/journal-scan", {
+  const res = await fetch("/api/science-sources", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ topics: topicNames, provider }),
@@ -2285,7 +2285,7 @@ export default function App() {
             <p className="hint">
               Every regular science search also checks Nature, Science, PNAS, leading Nature and
               APS physics journals, plus articles from The Quantum Insider, Physics World, Quanta
-              Magazine, and APS Physics.
+              Magazine.
             </p>
           </div>
           <div className="field">

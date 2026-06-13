@@ -1,4 +1,4 @@
-// /api/journal-scan - curated science journals and research-news articles.
+// /api/science-sources - curated science journals and research-news articles.
 //
 // The endpoint is called by the normal science search. It fetches a fixed
 // allowlist of respected sources, enriches DOI records with Semantic Scholar
@@ -20,15 +20,17 @@ const SOURCES = [
   { url: "https://www.nature.com/nnano.rss", venue: "Nature Nanotechnology", type: "journal" },
   { url: "https://www.nature.com/nmat.rss", venue: "Nature Materials", type: "journal" },
   { url: "https://www.nature.com/nphoton.rss", venue: "Nature Photonics", type: "journal" },
+  { url: "https://quantum-journal.org/feed/", venue: "Quantum", type: "journal" },
   { url: "https://feeds.aps.org/rss/recent/prl.xml", venue: "Physical Review Letters", type: "journal" },
   { url: "https://feeds.aps.org/rss/recent/prxquantum.xml", venue: "PRX Quantum", type: "journal" },
+  { url: "https://feeds.aps.org/rss/recent/prresearch.xml", venue: "Physical Review Research", type: "journal" },
   { url: "https://feeds.aps.org/rss/recent/prapplied.xml", venue: "Physical Review Applied", type: "journal" },
+  { url: "https://iopscience.iop.org/journal/rss/1367-2630", venue: "New Journal of Physics", type: "journal" },
 
   // Research news and explainers.
   { url: "https://thequantuminsider.com/feed/", venue: "The Quantum Insider", type: "article" },
   { url: "https://physicsworld.com/feed/", venue: "Physics World", type: "article" },
   { url: "https://www.quantamagazine.org/feed/", venue: "Quanta Magazine", type: "article" },
-  { url: "https://physics.aps.org/feed", venue: "APS Physics", type: "article" },
 ];
 
 const UA = { "User-Agent": "SpinStack/3.0 (personal research tool)" };
@@ -177,7 +179,7 @@ async function enrichAbstracts(items) {
       }
     });
   } catch (error) {
-    console.error("journal-scan: Semantic Scholar enrichment failed:", error.message);
+    console.error("science-sources: Semantic Scholar enrichment failed:", error.message);
   }
 }
 
@@ -216,7 +218,7 @@ export default async function handler(req, res) {
       }
     }
 
-    const items = [...byId.values()].slice(0, 90);
+    const items = [...byId.values()].slice(0, 120);
     await enrichAbstracts(items);
     const eligible = items.filter(
       (item) => item.title && (item.abstract.length >= 40 || item.mediaType === "journal")
@@ -252,7 +254,7 @@ export default async function handler(req, res) {
           );
         }
       } catch (error) {
-        console.error("journal-scan: AI relevance failed, using keyword fallback:", error.message);
+        console.error("science-sources: AI relevance failed, using keyword fallback:", error.message);
       }
     }
 
@@ -268,7 +270,7 @@ export default async function handler(req, res) {
       items: relevant,
     });
   } catch (error) {
-    console.error("journal-scan:", error);
+    console.error("science-sources:", error);
     return res.status(502).json({ error: `Science source search failed: ${error.message}` });
   }
 }
