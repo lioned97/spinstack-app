@@ -2,24 +2,20 @@
 // in one paper. Claude when ANTHROPIC_API_KEY is set, else free-tier
 // Gemini (see _llm.js). Keys live in Vercel env only.
 
-import { complete } from "./_llm.js";
+import { complete, availableProviders } from "./_llm.js";
 
 export default async function handler(req, res) {
-  // GET = health check: which provider would answer? (names only, no secrets)
+  // GET = health check: which providers are configured? (names only, no secrets)
   if (req.method === "GET") {
-    const provider = process.env.ANTHROPIC_API_KEY
-      ? "claude"
-      : process.env.GEMINI_API_KEY
-        ? "gemini"
-        : null;
-    return res.status(200).json({ ok: !!provider, provider });
+    const providers = availableProviders();
+    return res.status(200).json({ ok: providers.length > 0, provider: providers[0] || null, providers });
   }
   if (req.method !== "POST") {
     console.error("paper-chat:", `method ${req.method} not allowed`);
     return res.status(405).json({ error: "POST only" });
   }
 
-  const { mode, paper, selection, messages } = req.body || {};
+  const { mode, paper, selection, messages, provider } = req.body || {};
   if (!paper || !paper.title || !["explain", "questions", "chat"].includes(mode)) {
     console.error("paper-chat:", "bad request body", JSON.stringify({ mode, hasPaper: !!paper }));
     return res.status(400).json({ error: "Bad request: need mode + paper.title" });
@@ -78,7 +74,7 @@ export default async function handler(req, res) {
   }
 
   try {
-    const text = await complete({ system, messages: msgs, maxTokens: 500 });
+    const text = await complete({ system, messages: msgs, maxTokens: 500, prefer: provider });
 
     if (mode === "questions") {
       let questions = null;

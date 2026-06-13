@@ -138,6 +138,12 @@ a:hover { text-decoration: underline; }
   border-color: var(--teal-border); color: var(--teal);
   margin-left: 8px; font-size: 9px; padding: 2px 7px; vertical-align: 2px;
 }
+/* any selected chip highlights — works in the filter/sort sheet too, not
+   only inside a .chiprow */
+.chip.on {
+  border-color: var(--teal); color: var(--teal);
+  background: var(--teal-bg); font-weight: 600;
+}
 
 /* ── chip rows: topic filter + feed sort ── */
 .chiprow {

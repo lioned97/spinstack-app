@@ -10,7 +10,7 @@ export default async function handler(req, res) {
     console.error("expand:", `method ${req.method} not allowed`);
     return res.status(405).json({ error: "POST only" });
   }
-  const { topic, paper } = req.body || {};
+  const { topic, paper, provider } = req.body || {};
   if (!topic && !paper?.title) {
     console.error("expand:", "need topic or paper");
     return res.status(400).json({ error: "Need topic or paper" });
@@ -39,6 +39,7 @@ export default async function handler(req, res) {
     const text = await complete({
       messages: [{ role: "user", content: prompt }],
       maxTokens: 250,
+      prefer: provider,
     });
     let parsed = null;
     try {

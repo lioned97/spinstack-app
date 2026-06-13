@@ -89,6 +89,13 @@ const SOURCE_LABELS = {
   rss: "RSS feeds",
 };
 
+const PROVIDER_LABELS = {
+  auto: "Auto",
+  gemini: "Gemini Flash",
+  claude: "Claude Haiku",
+  perplexity: "Perplexity Sonar",
+};
+
 const SORT_LABELS = {
   relevance: "RELEVANCE",
   papers: "PAPERS FIRST",
@@ -622,6 +629,11 @@ export default function App() {
   const liveTopics = useMemo(() => topics.filter((t) => !t.deleted), [topics]);
   const visibleTopics = useMemo(() => liveTopics.filter((t) => !t.hidden), [liveTopics]);
 
+  // preferred AI provider sent to the /api/* endpoints ("auto" = let the
+  // server pick the first configured one)
+  const aiProvider =
+    settings.aiProvider && settings.aiProvider !== "auto" ? settings.aiProvider : undefined;
+
   // category switcher (B2): "all" | "science" | "travel"
   const activeCategory = settings.activeCategory || "all";
   const chipTopics = useMemo(
@@ -827,6 +839,7 @@ export default function App() {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
+              provider: aiProvider,
               paper: {
                 title: p.title,
                 abstract: p.abstract,
@@ -991,7 +1004,7 @@ export default function App() {
           const er = await fetch("/api/expand", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ topic: name }),
+            body: JSON.stringify({ topic: name, provider: aiProvider }),
           });
           if (er.ok) {
             const exp = await er.json();
@@ -1268,6 +1281,7 @@ export default function App() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         mode,
+        provider: aiProvider,
         paper: { title: paper.title, abstract: paper.abstract, venue: paper.venue, year: paper.year },
         selection,
         messages,
@@ -1464,6 +1478,7 @@ export default function App() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+          provider: aiProvider,
           paper: {
             title: paper.title,
             abstract: paper.abstract,
@@ -2197,17 +2212,35 @@ export default function App() {
               {aiStatus === null
                 ? "Checking…"
                 : aiStatus.ok
-                  ? `Ready · ${aiStatus.provider === "claude" ? "Claude Haiku" : "Gemini Flash"}`
+                  ? `Ready · ${PROVIDER_LABELS[aiProvider && (aiStatus.providers || []).includes(aiProvider) ? aiProvider : aiStatus.provider] || aiStatus.provider}`
                   : "Not configured"}
-              {aiStatus && !aiStatus.ok && (
-                <button onClick={() => setShowAiHelp((v) => !v)}>▾ Setup</button>
-              )}
+              <button onClick={() => setShowAiHelp((v) => !v)}>▾ Setup</button>
+            </div>
+            <div className="mode" role="radiogroup" aria-label="AI provider" style={{ marginTop: 8 }}>
+              {["auto", "gemini", "claude", "perplexity"].map((p) => {
+                const configured =
+                  p === "auto" || (aiStatus?.providers || []).includes(p);
+                return (
+                  <button
+                    key={p}
+                    className={(settings.aiProvider || "auto") === p ? "on" : ""}
+                    onClick={() => updateSettings({ aiProvider: p })}
+                    title={configured ? "" : "No key set — will fall back to Auto"}
+                  >
+                    {p.toUpperCase()}
+                    {!configured && p !== "auto" ? " •" : ""}
+                  </button>
+                );
+              })}
             </div>
             {showAiHelp && (
               <p className="hint">
-                Free setup: get a key at aistudio.google.com/apikey → Vercel → spinstack-app →
-                Settings → Environment Variables → add <b>GEMINI_API_KEY</b> → Redeploy. Powers
-                “Why?”, EXPLAIN, QUESTIONS and the paper chat.
+                Powers “Why?”, EXPLAIN, QUESTIONS, the paper chat, topic search and figure
+                descriptions. Add any of these in Vercel → spinstack-app → Settings → Environment
+                Variables, then Redeploy: <b>GEMINI_API_KEY</b> (free,
+                aistudio.google.com/apikey), <b>ANTHROPIC_API_KEY</b>, or <b>PERPLEXITY_API_KEY</b>
+                (paid, web-grounded search — perplexity.ai/settings/api). A “•” above marks a
+                provider with no key yet. Vision figure descriptions always use Gemini or Claude.
               </p>
             )}
           </div>

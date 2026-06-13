@@ -11,7 +11,7 @@ export default async function handler(req, res) {
     return res.status(405).json({ error: "POST only" });
   }
 
-  const { paper, context } = req.body || {};
+  const { paper, context, provider } = req.body || {};
   if (!paper || !paper.title) {
     console.error("analyze:", "missing paper in request body");
     return res.status(400).json({ error: "Missing paper in request body." });
@@ -43,6 +43,7 @@ export default async function handler(req, res) {
     const text = await complete({
       messages: [{ role: "user", content: prompt }],
       maxTokens: 400,
+      prefer: provider,
     });
     return res.status(200).json({ analysis: text || "Empty response from model." });
   } catch (err) {
