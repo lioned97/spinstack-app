@@ -111,6 +111,22 @@ const nowISO = () => new Date().toISOString();
 
 const catOf = (x) => (x && x.category) || "science";
 
+// Persist the device-local paper pool. Figures are base64 image data —
+// far too big for the ~5MB localStorage quota on mobile, and not needed
+// for the offline feed (they re-fetch on demand), so strip them before
+// writing. Wrapped so a QuotaExceededError can NEVER bubble out of a
+// React state updater and white-screen the whole app.
+function savePool(arr) {
+  try {
+    const slim = arr.map((p) =>
+      p && p.figures ? { ...p, figures: undefined, figuresTried: undefined } : p
+    );
+    localStorage.setItem("ss2_pool", JSON.stringify(slim));
+  } catch (e) {
+    console.warn("ss2_pool not cached:", e && e.name);
+  }
+}
+
 function arxivIdOf(p) {
   if (p.arxivId) return String(p.arxivId).replace(/v\d+$/, "");
   if (typeof p.id === "string" && p.id.startsWith("arxiv:")) return p.id.slice(6);
@@ -558,7 +574,7 @@ export default function App() {
       }
       const merged = [...byId.values()];
       setPool(merged);
-      localStorage.setItem("ss2_pool", JSON.stringify(merged)); // device-local cache, not synced
+      savePool(merged); // device-local cache, not synced
       if (showStatus) showToast(`${merged.length} papers loaded`);
     } catch {
       if (showStatus) showToast(navigator.onLine ? "Feed unavailable" : "Offline — showing cached papers");
@@ -614,7 +630,7 @@ export default function App() {
       const merged = [...byId.values()];
       const added = merged.length - before.size;
       setPool(merged);
-      localStorage.setItem("ss2_pool", JSON.stringify(merged));
+      savePool(merged);
       showToast(added > 0 ? `${added} new papers found` : "No new papers found");
     } catch {
       showToast("Re-run failed — check connection");
@@ -1053,7 +1069,7 @@ export default function App() {
       for (const p of [...fresh, ...pool]) if (p?.id && !byId.has(p.id)) byId.set(p.id, p);
       const merged = [...byId.values()];
       setPool(merged);
-      localStorage.setItem("ss2_pool", JSON.stringify(merged));
+      savePool(merged);
       showToast(toastMsg);
     } catch {
       showToast("Live fetch failed — daily harvest will cover it");
@@ -1195,7 +1211,7 @@ export default function App() {
       await savePdf(p.id, file);
       setPool((prev) => {
         const merged = prev.map((x) => (x.id === p.id ? { ...x, pdfLocal: true } : x));
-        localStorage.setItem("ss2_pool", JSON.stringify(merged));
+        savePool(merged);
         return merged;
       });
       // saved papers carry their own copy of the record — flag it there too
@@ -1240,7 +1256,7 @@ export default function App() {
             // cache the resolution on the pool item (device-local)
             const merged = pool.map((x) => (x.id === p.id ? { ...x, pdf: pdfUrl } : x));
             setPool(merged);
-            localStorage.setItem("ss2_pool", JSON.stringify(merged));
+            savePool(merged);
           }
         }
       } catch {}
@@ -1377,7 +1393,7 @@ export default function App() {
     const stamp = (patch) => {
       setPool((prev) => {
         const merged = prev.map((x) => (x.id === p.id ? { ...x, ...patch } : x));
-        localStorage.setItem("ss2_pool", JSON.stringify(merged));
+        savePool(merged);
         return merged;
       });
     };
@@ -1426,7 +1442,7 @@ export default function App() {
             );
             return { ...x, figures: figs };
           });
-          localStorage.setItem("ss2_pool", JSON.stringify(merged));
+          savePool(merged);
           return merged;
         });
       }

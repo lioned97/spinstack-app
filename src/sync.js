@@ -50,7 +50,16 @@ const sGet = (k, fallback) => {
     return fallback;
   }
 };
-const sSetRaw = (k, v) => localStorage.setItem(k, JSON.stringify(v));
+const sSetRaw = (k, v) => {
+  // never let a QuotaExceededError (or private-mode block) bubble into a
+  // React render and white-screen the app — the cloud row is the source
+  // of truth anyway.
+  try {
+    localStorage.setItem(k, JSON.stringify(v));
+  } catch (e) {
+    console.warn("sync: local write failed for", k, e && e.name);
+  }
+};
 
 let pushTimer = null;
 let pullDone = false;
