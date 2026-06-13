@@ -200,37 +200,34 @@ export default function PaperCard({
             More
           </button>
         )}
-        {canRead(p) ? (
+        {/* Read the resolved PDF (arXiv / uploaded / open-access) */}
+        {canRead(p) && (
           <button className="btn ghost" onClick={() => onOpenReader(p)} title="Read PDF" aria-label="Read PDF">
             <BookOpen size={15} style={{ verticalAlign: "-3px" }} />
           </button>
-        ) : settings.libraryProxy && p.url && isPaywalled(p) ? (
-          // paywalled publisher + proxy configured → primary CTA, not a ghost icon
+        )}
+        {/* Paywalled + proxy configured → prominent "Open via library" CTA */}
+        {!canRead(p) && settings.libraryProxy && p.url && isPaywalled(p) && (
           <button className="btn proxy-btn" onClick={() => onOpenProxy(p)}>
             <Landmark size={15} style={{ verticalAlign: "-3px" }} />{" "}
             {settings.proxyLabel ? `Open via ${settings.proxyLabel}` : "Open via library"}
           </button>
-        ) : (
-          <>
-            {settings.libraryProxy && p.url && (
-              <button
-                className="btn ghost"
-                onClick={() => onOpenProxy(p)}
-                title="Open via library"
-                aria-label="Open via library"
-              >
-                <Landmark size={15} style={{ verticalAlign: "-3px" }} />
-              </button>
-            )}
-            <button
-              className="btn ghost"
-              onClick={() => onPickPdf(p)}
-              title="Attach a PDF file for the reader"
-              aria-label="Attach PDF"
-            >
-              <Paperclip size={15} style={{ verticalAlign: "-3px" }} />
-            </button>
-          </>
+        )}
+        {!canRead(p) && settings.libraryProxy && p.url && !isPaywalled(p) && (
+          <button className="btn ghost" onClick={() => onOpenProxy(p)} title="Open via library" aria-label="Open via library">
+            <Landmark size={15} style={{ verticalAlign: "-3px" }} />
+          </button>
+        )}
+        {/* Attach your own PDF — always available unless one is already uploaded */}
+        {!p.pdfLocal && (
+          <button
+            className="btn ghost"
+            onClick={() => onPickPdf(p)}
+            title="Attach a PDF file for the reader"
+            aria-label="Attach PDF"
+          >
+            <Paperclip size={15} style={{ verticalAlign: "-3px" }} />
+          </button>
         )}
         {cat === "science" && onRelated && (
           <button className="btn ghost" onClick={() => onRelated(p)} title="Related papers" aria-label="Related papers">

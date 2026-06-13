@@ -450,6 +450,7 @@ export default function App() {
   const [syncStatus, setSyncStatus] = useState("syncing");
   const [loadingFeed, setLoadingFeed] = useState(false);
   const [rerunning, setRerunning] = useState(false);
+  const [scanning, setScanning] = useState(false);
   const [analyzingId, setAnalyzingId] = useState(null);
   const [expanded, setExpanded] = useState({});
   const [newTopic, setNewTopic] = useState("");
@@ -649,6 +650,55 @@ export default function App() {
   // server pick the first configured one)
   const aiProvider =
     settings.aiProvider && settings.aiProvider !== "auto" ? settings.aiProvider : undefined;
+
+  // Scan Nature-family journals: triage by ABSTRACT (the RSS has no
+  // abstract, so the server pulls it from OpenAlex), keep AI-judged
+  // relevant ones, add them as cards. No PDF — the user attaches one.
+  async function scanJournals() {
+    if (scanning) return;
+    setScanning(true);
+    showToast("Scanning Nature journals…");
+    try {
+      const sci = topics.filter((t) => !t.deleted && !t.hidden && catOf(t) === "science");
+      const topicNames = sci.map((t) => t.name);
+      const res = await fetch("/api/journal-scan", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ topics: topicNames, provider: aiProvider }),
+      });
+      const data = res.ok ? await res.json() : null;
+      const found = (data?.items || [])
+        .map((it) => ({
+          id: it.doi ? `doi:${it.doi.toLowerCase()}` : `nature:${it.url}`,
+          title: it.title,
+          abstract: it.abstract || "",
+          authors: it.authors || [],
+          year: it.year,
+          venue: it.venue || "Nature",
+          url: it.url,
+          doi: it.doi || undefined,
+          source: "nature",
+          category: "science",
+          harvestedAt: nowISO(),
+        }))
+        .filter((p) => p.id && p.title);
+      const before = new Set(pool.map((p) => p.id));
+      const byId = new Map();
+      for (const p of [...found, ...pool]) if (p?.id && !byId.has(p.id)) byId.set(p.id, p);
+      const merged = [...byId.values()];
+      const added = merged.length - before.size;
+      setPool(merged);
+      savePool(merged);
+      if (added > 0) showToast(`Added ${added} relevant Nature paper${added > 1 ? "s" : ""} — attach a PDF to read`);
+      else if (data && (data.note || (data.items || []).length === 0))
+        showToast(data?.note === "abstracts not yet indexed" ? "New articles not indexed yet — try again later" : "No new relevant papers found");
+      else showToast("No new relevant papers found");
+    } catch {
+      showToast("Journal scan failed — check connection");
+    } finally {
+      setScanning(false);
+    }
+  }
 
   // category switcher (B2): "all" | "science" | "travel"
   const activeCategory = settings.activeCategory || "all";
@@ -2196,6 +2246,23 @@ export default function App() {
               onChange={(e) => updateSettings({ harvestUrl: e.target.value })}
             />
             <p className="hint">Daily harvest output (papers/latest.json on GitHub).</p>
+          </div>
+          <div className="field">
+            <label>Journal scan (Nature)</label>
+            <button
+              className="btn ghost"
+              style={{ border: "1px solid var(--line)" }}
+              disabled={scanning}
+              onClick={scanJournals}
+            >
+              <Newspaper size={14} style={{ verticalAlign: "-2px" }} />{" "}
+              {scanning ? "Scanning…" : "Scan Nature journals for relevant papers"}
+            </button>
+            <p className="hint">
+              Reads the latest Nature, Nature Physics, Nature Communications & Nature Reviews
+              Physics by abstract, keeps the ones AI judges relevant to your science topics, and
+              adds them as cards. They have no PDF — tap the 📎 on a card to attach one.
+            </p>
           </div>
           <div className="field">
             <label>Travel article feeds</label>
