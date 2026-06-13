@@ -28,6 +28,7 @@ import {
   ArrowLeft,
   Circle,
   CheckCircle2,
+  Search as SearchIcon,
 } from "lucide-react";
 import { sGet, persist, onSyncStatus } from "./sync.js";
 import { savePdf, loadPdf } from "./pdfstore.js";
@@ -678,11 +679,15 @@ export default function App() {
   const [lightbox, setLightbox] = useState(null); // {dataUrl, caption} of full-screen figure
   const [filterSheet, setFilterSheet] = useState(false); // collapsed filter/sort sheet (P7b)
   const [sourcePop, setSourcePop] = useState(false); // sources popover (P3b)
+  const [sourceQuery, setSourceQuery] = useState(""); // search-within-sources filter
   const [rowMenu, setRowMenu] = useState(null); // saved-row ⋯ popover (P7c)
   const [showAiHelp, setShowAiHelp] = useState(false);
   const [showMap, setShowMap] = useState(false); // travel places map overlay
   const [aiStatus, setAiStatus] = useState(null); // {ok, provider} from /api/paper-chat health
   const [relatedView, setRelatedView] = useState(null); // {paper, loading, items} overlay
+  const [searchSheet, setSearchSheet] = useState(false); // "search for a paper" input sheet
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchView, setSearchView] = useState(null); // {query, loading, items} results overlay
   // manual paper upload & read tracking states (Features A & B)
   const [uploadSheet, setUploadSheet] = useState(false);
   const [uploadUrl, setUploadUrl] = useState("");
@@ -732,6 +737,7 @@ export default function App() {
   const chatMsgsRef = useRef(null);
   const fileInputRef = useRef(null);
   const uploadTargetRef = useRef(null); // paper awaiting a PDF file pick
+  const newPdfInputRef = useRef(null); // file picker for adding a brand-new paper from a PDF
 
   // keep the chat scrolled to the newest message
   useEffect(() => {
@@ -1370,12 +1376,122 @@ export default function App() {
     setUploadLoading(false);
   }
 
+  // Find a paper already in the pool or saved set that matches an incoming
+  // one (by DOI, arXiv id, exact URL, or normalized title) — so "add a
+  // paper" doesn't create a duplicate card (item 4).
+  function findExistingPaper({ title, doi, arxivId, url }) {
+    const nt = normTitle(title || "");
+    const ax = arxivId ? String(arxivId).replace(/v\d+$/, "") : "";
+    const all = [...pool, ...Object.values(saved)];
+    return all.find((p) => {
+      if (doi && p.doi && p.doi.toLowerCase() === doi.toLowerCase()) return true;
+      if (ax && arxivIdOf(p) === ax) return true;
+      if (url && p.url && p.url === url) return true;
+      return nt && normTitle(p.title) === nt;
+    });
+  }
+
+  // Add a brand-new paper straight from a PDF file (no URL): store the file,
+  // create a saved card flagged pdfLocal so it opens in the reader (item 4).
+  async function onNewPdfPicked(e) {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    if (file.type !== "application/pdf" && !file.name.toLowerCase().endsWith(".pdf")) {
+      return showToast("That's not a PDF file");
+    }
+    const title = file.name.replace(/\.pdf$/i, "").replace(/[_]+/g, " ").trim() || "Uploaded PDF";
+    const existing = findExistingPaper({ title });
+    if (existing) {
+      try {
+        await savePdf(existing.id, file);
+      } catch {
+        return showToast("Couldn't store the PDF on this device");
+      }
+      const merged = pool.map((x) => (x.id === existing.id ? { ...x, pdfLocal: true } : x));
+      setPool(merged);
+      savePool(merged);
+      const ns = { ...saved, [existing.id]: { ...existing, pdfLocal: true, savedAt: nowISO() } };
+      setSaved(ns);
+      persist("ss2_saved", ns);
+      setUploadSheet(false);
+      return showToast("Matched an existing card — PDF attached & saved");
+    }
+    const id = "manual_" + Math.random().toString(36).slice(2, 11);
+    try {
+      await savePdf(id, file);
+    } catch {
+      return showToast("Couldn't store the PDF on this device");
+    }
+    const paper = {
+      id,
+      title,
+      abstract: "",
+      authors: [],
+      year: new Date().getFullYear(),
+      venue: "Uploaded PDF",
+      url: "",
+      category: "science",
+      source: "manual-upload",
+      pdfLocal: true,
+      savedAt: nowISO(),
+      harvestedAt: nowISO(),
+    };
+    const ns = { ...saved, [id]: paper };
+    setSaved(ns);
+    persist("ss2_saved", ns);
+    setUploadSheet(false);
+    showToast("PDF added to Saved — open it to read");
+  }
+
+  // Keyword paper search (item 3): query the live engines and show matches
+  // as cards in a results overlay, where they can be saved / read / attached.
+  async function runPaperSearch(query) {
+    const q = (query || "").trim();
+    if (!q) return;
+    setSearchSheet(false);
+    setSearchView({ query: q, loading: true, items: [] });
+    try {
+      const [sci, travel] = await Promise.allSettled([
+        fetchScienceTopic({ name: q }),
+        fetchTravelTopic(q),
+      ]);
+      const out = [];
+      if (sci.status === "fulfilled") out.push(...sci.value.items);
+      if (travel.status === "fulfilled") out.push(...travel.value);
+      const byId = new Map();
+      for (const p of out) if (p?.id && !byId.has(p.id)) byId.set(p.id, p);
+      const items = [...byId.values()]
+        .map((p) => ({ ...p, _score: scoreCard(p, visibleTopics, affinity) }))
+        .sort((a, b) => b._score - a._score)
+        .slice(0, 40);
+      setSearchView({ query: q, loading: false, items });
+      if (items.length === 0) showToast("No papers found for that search");
+    } catch {
+      setSearchView({ query: q, loading: false, items: [] });
+      showToast("Search failed — check connection");
+    }
+  }
+
   async function saveManualPaper() {
     if (!uploadForm.title.trim()) {
       showToast("Title is required");
       return;
     }
     setUploadLoading(true);
+    // de-dupe: if this paper already exists, just save that card
+    const existing = findExistingPaper({ title: uploadForm.title.trim(), url: uploadUrl.trim() });
+    if (existing) {
+      if (!saved[existing.id]) {
+        const ns = { ...saved, [existing.id]: { ...existing, savedAt: nowISO() } };
+        setSaved(ns);
+        persist("ss2_saved", ns);
+      }
+      setUploadLoading(false);
+      setUploadSheet(false);
+      showToast("Already in your cards — saved to profile");
+      return;
+    }
     const id = "manual_" + Math.random().toString(36).substring(2, 11);
     const paper = {
       id,
@@ -1790,7 +1906,8 @@ export default function App() {
         window.open(settings.libraryProxy + encodeURIComponent(p.url), "_blank");
         showToast("Opening via library proxy");
       } else {
-        showToast("No open-access PDF found");
+        // no readable PDF — fall back to attaching the file yourself
+        showToast("No open-access PDF — tap 📎 to attach the file");
       }
       return;
     }
@@ -2165,6 +2282,16 @@ export default function App() {
             ))}
           </div>
         )}
+        <button
+          onClick={() => {
+            setSearchQuery("");
+            setSearchSheet(true);
+          }}
+          title="Search for a paper"
+          aria-label="Search for a paper"
+        >
+          <SearchIcon size={16} color="var(--dim)" />
+        </button>
         <button onClick={() => loadFeed(true)} title="Refresh feed" aria-label="Refresh feed">
           <RefreshCw size={16} color={loadingFeed ? "var(--teal)" : "var(--dim)"} className={loadingFeed ? "spin" : ""} />
         </button>
@@ -2232,13 +2359,24 @@ export default function App() {
           <span style={{ position: "relative" }}>
             <button
               className={`chip${sourceFilterActive ? " on" : ""}`}
-              onClick={() => setSourcePop((v) => !v)}
+              onClick={() => {
+                setSourceQuery("");
+                setSourcePop((v) => !v);
+              }}
               aria-label="Filter by source"
             >
               ⊞ SOURCES
             </button>
             {sourcePop && (
               <div className="source-popover">
+                <input
+                  className="input source-search"
+                  type="search"
+                  placeholder="Search sources…"
+                  value={sourceQuery}
+                  onChange={(e) => setSourceQuery(e.target.value)}
+                  autoFocus
+                />
                 <div className="source-popover-actions">
                   <button
                     className="btn ghost"
@@ -2249,23 +2387,35 @@ export default function App() {
                     {allVisibleSourcesSelected ? "Deselect all" : "Select all"}
                   </button>
                 </div>
-                {populatedSourceCategories.map((category) => (
-                  <div className="source-popover-group" key={category}>
-                    <div className="source-popover-title">{category}</div>
-                    <div className="source-popover-options">
-                      {sourcesByCategory[category].map((source) => (
-                        <label key={`${category}:${source}`}>
-                          <input
-                            type="checkbox"
-                            checked={sourceSelections[category].includes(source)}
-                            onChange={() => toggleSource(category, source)}
-                          />
-                          {source}
-                        </label>
-                      ))}
+                {(() => {
+                  const q = sourceQuery.trim().toLowerCase();
+                  const groups = populatedSourceCategories
+                    .map((category) => [
+                      category,
+                      sourcesByCategory[category].filter((s) => s.toLowerCase().includes(q)),
+                    ])
+                    .filter(([, list]) => list.length > 0);
+                  if (groups.length === 0) {
+                    return <div className="source-popover-empty">No sources match “{sourceQuery}”.</div>;
+                  }
+                  return groups.map(([category, list]) => (
+                    <div className="source-popover-group" key={category}>
+                      <div className="source-popover-title">{category}</div>
+                      <div className="source-popover-options">
+                        {list.map((source) => (
+                          <label key={`${category}:${source}`}>
+                            <input
+                              type="checkbox"
+                              checked={sourceSelections[category].includes(source)}
+                              onChange={() => toggleSource(category, source)}
+                            />
+                            {source}
+                          </label>
+                        ))}
+                      </div>
                     </div>
-                  </div>
-                ))}
+                  ));
+                })()}
               </div>
             )}
           </span>
@@ -3071,6 +3221,75 @@ export default function App() {
         </button>
       </nav>
 
+      {searchSheet && (
+        <div className="share-overlay" onClick={() => setSearchSheet(false)}>
+          <div className="share-sheet" onClick={(e) => e.stopPropagation()}>
+            <div className="section-h" style={{ margin: 0 }}>
+              Search for a paper
+            </div>
+            <p className="hint" style={{ marginTop: 0 }}>
+              Searches arXiv, OpenAlex, Semantic Scholar (and travel sources) live. Save any result
+              to keep it.
+            </p>
+            <form
+              className="chat-input"
+              onSubmit={(e) => {
+                e.preventDefault();
+                runPaperSearch(searchQuery);
+              }}
+            >
+              <input
+                className="input"
+                type="search"
+                autoFocus
+                placeholder="Title, topic or keywords…"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+              />
+              <button
+                className="btn save"
+                type="submit"
+                disabled={!searchQuery.trim()}
+                style={{ flex: "0 0 auto" }}
+              >
+                <SearchIcon size={15} style={{ verticalAlign: "-3px" }} /> Search
+              </button>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {searchView && (
+        <div className="related-overlay">
+          <header className="reader-hdr">
+            <button onClick={() => setSearchView(null)} aria-label="Back">
+              <ArrowLeft size={18} color="var(--dim)" />
+            </button>
+            <span className="reader-title" style={{ maxWidth: "75%" }}>
+              Results: {searchView.query}
+            </span>
+          </header>
+          <div className="related-scroll">
+            {searchView.loading ? (
+              Array.from({ length: 3 }).map((_, i) => (
+                <div key={i} className="card shimmer">
+                  <div className="shimmer-line short" />
+                  <div className="shimmer-line" />
+                  <div className="shimmer-line mid" />
+                </div>
+              ))
+            ) : searchView.items.length === 0 ? (
+              <div className="empty">
+                <div className="big">No papers found</div>
+                Try different keywords, or add it directly from the SAVED tab → Add paper.
+              </div>
+            ) : (
+              searchView.items.map((p) => <PaperCard key={p.id} p={p} {...cardProps} />)
+            )}
+          </div>
+        </div>
+      )}
+
       {relatedView && (
         <div className="related-overlay">
           <header className="reader-hdr">
@@ -3261,6 +3480,22 @@ export default function App() {
                     {uploadLoading ? "Fetching..." : "Fetch Metadata"}
                   </button>
                 </div>
+                <div style={{ display: "flex", alignItems: "center", gap: 10, margin: "14px 0 2px" }}>
+                  <div style={{ flex: 1, height: 1, background: "var(--line)" }} />
+                  <span className="hint" style={{ margin: 0 }}>or</span>
+                  <div style={{ flex: 1, height: 1, background: "var(--line)" }} />
+                </div>
+                <button
+                  className="btn ghost"
+                  style={{ width: "100%", border: "1px solid var(--line)" }}
+                  onClick={() => newPdfInputRef.current?.click()}
+                >
+                  <Paperclip size={15} style={{ verticalAlign: "-3px" }} /> Attach a PDF file
+                </button>
+                <p className="hint" style={{ marginTop: 6 }}>
+                  Adds a card straight from a PDF on your device (stored locally) and opens it in
+                  the reader. If it matches an existing card, the PDF is attached to that one.
+                </p>
               </div>
             )}
 
@@ -3509,6 +3744,13 @@ export default function App() {
         accept="application/pdf"
         style={{ display: "none" }}
         onChange={onPdfPicked}
+      />
+      <input
+        ref={newPdfInputRef}
+        type="file"
+        accept="application/pdf"
+        style={{ display: "none" }}
+        onChange={onNewPdfPicked}
       />
 
       {toast && <div className="toast">{toast}</div>}
