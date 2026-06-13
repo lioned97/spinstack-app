@@ -26,6 +26,8 @@ import {
   Filter as FilterIcon,
   MoreHorizontal,
   ArrowLeft,
+  Circle,
+  CheckCircle2,
 } from "lucide-react";
 import { sGet, persist, onSyncStatus } from "./sync.js";
 import { savePdf, loadPdf } from "./pdfstore.js";
@@ -521,6 +523,17 @@ export default function App() {
   const [showMap, setShowMap] = useState(false); // travel places map overlay
   const [aiStatus, setAiStatus] = useState(null); // {ok, provider} from /api/paper-chat health
   const [relatedView, setRelatedView] = useState(null); // {paper, loading, items} overlay
+  // manual paper upload & read tracking states (Features A & B)
+  const [uploadSheet, setUploadSheet] = useState(false);
+  const [uploadUrl, setUploadUrl] = useState("");
+  const [uploadLoading, setUploadLoading] = useState(false);
+  const [uploadResult, setUploadResult] = useState(null); // null, 'form', or 'done'
+  const [uploadForm, setUploadForm] = useState({ title: "", authors: "", abstract: "", year: "", venue: "" });
+  const [suggestedTopics, setSuggestedTopics] = useState([]);
+  const [suggestedTopicsLoading, setSuggestedTopicsLoading] = useState(false);
+  const [journalStatus, setJournalStatus] = useState(null); // { status, name, id }
+  const [customRssUrl, setCustomRssUrl] = useState("");
+
   const [settings, setSettings] = useState(() =>
     sGet("ss2_settings", {
       uiMode: "feed",
@@ -941,14 +954,29 @@ export default function App() {
   // saved list: category filter (P3a) + sorting
   const savedSort = settings.savedSort || "recent";
   const savedCategory = settings.savedCategory || "all";
+  const savedReadFilter = settings.savedReadFilter || "all";
   const savedList = useMemo(() => {
     let list = Object.values(saved);
     if (savedCategory !== "all") list = list.filter((p) => catOf(p) === savedCategory);
+    if (savedReadFilter === "unread") {
+      list = list.filter((p) => !p.readAt);
+    } else if (savedReadFilter === "read") {
+      list = list.filter((p) => !!p.readAt);
+    }
+
     if (savedSort === "year") return list.sort((a, b) => (b.year || 0) - (a.year || 0));
     if (savedSort === "title")
       return list.sort((a, b) => String(a.title).localeCompare(String(b.title)));
+    if (savedSort === "read") {
+      return list.sort((a, b) => {
+        const aRead = a.readAt ? 1 : 0;
+        const bRead = b.readAt ? 1 : 0;
+        if (aRead !== bRead) return aRead - bRead;
+        return (b.savedAt || "").localeCompare(a.savedAt || "");
+      });
+    }
     return list.sort((a, b) => (b.savedAt || "").localeCompare(a.savedAt || ""));
-  }, [saved, savedSort, savedCategory]);
+  }, [saved, savedSort, savedCategory, savedReadFilter]);
 
   const newCount = useMemo(
     () => triage.filter((p) => (p.harvestedAt || "") > (lastSeen || "")).length,
@@ -1159,6 +1187,150 @@ export default function App() {
     persist("ss2_saved", ns);
   }
 
+  function toggleRead(id) {
+    const p = saved[id];
+    if (!p) return;
+    const ns = { ...saved, [id]: { ...p, readAt: p.readAt ? null : nowISO(), savedAt: nowISO() } };
+    setSaved(ns);
+    persist("ss2_saved", ns);
+    showToast(p.readAt ? "Marked as unread" : "Marked as read");
+  }
+
+  async function fetchMetadata(urlVal) {
+    const targetUrl = (urlVal || uploadUrl).trim();
+    if (!targetUrl) {
+      setUploadResult("form");
+      setUploadForm({ title: "", authors: "", abstract: "", year: new Date().getFullYear().toString(), venue: "" });
+      return;
+    }
+    setUploadLoading(true);
+    try {
+      const res = await fetch("/api/paper-meta", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url: targetUrl })
+      });
+      if (res.ok) {
+        const meta = await res.json();
+        setUploadForm({
+          title: meta.title || "",
+          authors: (meta.authors || []).map(a => a.name).join(", "),
+          abstract: meta.abstract || "",
+          year: (meta.year || new Date().getFullYear()).toString(),
+          venue: meta.venue || ""
+        });
+      } else {
+        showToast("Fetch failed · entering manually");
+        setUploadForm({ title: "", authors: "", abstract: "", year: new Date().getFullYear().toString(), venue: "" });
+      }
+    } catch (err) {
+      console.error(err);
+      showToast("Fetch failed · entering manually");
+      setUploadForm({ title: "", authors: "", abstract: "", year: new Date().getFullYear().toString(), venue: "" });
+    }
+    setUploadResult("form");
+    setUploadLoading(false);
+  }
+
+  async function saveManualPaper() {
+    if (!uploadForm.title.trim()) {
+      showToast("Title is required");
+      return;
+    }
+    setUploadLoading(true);
+    const id = "manual_" + Math.random().toString(36).substring(2, 11);
+    const paper = {
+      id,
+      title: uploadForm.title.trim(),
+      abstract: uploadForm.abstract.trim(),
+      authors: uploadForm.authors.split(",").map(a => ({ name: a.trim() })).filter(a => a.name),
+      year: parseInt(uploadForm.year, 10) || new Date().getFullYear(),
+      venue: uploadForm.venue.trim(),
+      url: uploadUrl.trim(),
+      savedAt: nowISO(),
+      source: "manual-upload"
+    };
+
+    const ns = { ...saved, [id]: paper };
+    setSaved(ns);
+    persist("ss2_saved", ns);
+    showToast("Paper saved to profile");
+
+    setSuggestedTopicsLoading(true);
+    try {
+      const activeTopics = topics.filter(t => !t.deleted).map(t => t.name);
+      const res = await fetch("/api/suggest-topics", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title: paper.title,
+          abstract: paper.abstract,
+          existingTopics: activeTopics
+        })
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setSuggestedTopics(data.topics || []);
+      }
+    } catch (err) {
+      console.error(err);
+    }
+    setSuggestedTopicsLoading(false);
+
+    if (paper.venue) {
+      const vLower = paper.venue.toLowerCase().replace(/[^a-z0-9]+/g, "");
+      const matched = SCIENCE_PUBLICATIONS.find(s =>
+        s.id.toLowerCase() === vLower ||
+        s.label.toLowerCase().replace(/[^a-z0-9]+/g, "") === vLower
+      );
+      if (matched) {
+        const isActive = selectedScienceSources.includes(matched.id);
+        if (isActive) {
+          setJournalStatus({ status: "tracked", name: matched.label });
+        } else {
+          setJournalStatus({ status: "inactive", name: matched.label, id: matched.id });
+        }
+      } else {
+        setJournalStatus({ status: "untracked", name: paper.venue });
+      }
+    } else {
+      setJournalStatus(null);
+    }
+
+    setUploadResult("done");
+    setUploadLoading(false);
+  }
+
+  function addSuggestedTopic(name) {
+    performAddTopic(name, "science");
+    setSuggestedTopics(prev => prev.filter(t => t !== name));
+  }
+
+  function enableTrackedJournal(sourceId) {
+    const next = [...selectedScienceSources, sourceId];
+    updateSettings({ scienceSources: next });
+    setJournalStatus({ ...journalStatus, status: "tracked" });
+    showToast(`Enabled ${journalStatus.name} in science sources`);
+  }
+
+  function addCustomRssFeed() {
+    if (!customRssUrl.trim()) {
+      showToast("Please enter an RSS/Atom URL");
+      return;
+    }
+    const venue = uploadForm.venue.trim() || "Custom Journal";
+    const feeds = settings.customScienceFeeds || [];
+    if (feeds.some(f => f.url.toLowerCase() === customRssUrl.trim().toLowerCase())) {
+      showToast("Feed URL is already added");
+      return;
+    }
+    const nextFeeds = [...feeds, { url: customRssUrl.trim(), venue, addedAt: nowISO() }];
+    updateSettings({ customScienceFeeds: nextFeeds });
+    showToast(`Added feed for ${venue}`);
+    setCustomRssUrl("");
+    setJournalStatus({ status: "tracked", name: venue });
+  }
+
   // ── keyboard (desktop swipe mode) ──
   useEffect(() => {
     if (tab !== "stack" || settings.uiMode !== "swipe") return;
@@ -1189,15 +1361,10 @@ export default function App() {
   };
 
   // ── topics ──
-  async function addTopic(e) {
-    e.preventDefault();
-    const name = newTopic.trim();
-    if (!name) return;
+  async function performAddTopic(name, category = "science") {
     if (topics.some((t) => !t.deleted && t.name.toLowerCase() === name.toLowerCase())) {
-      setNewTopic("");
       return showToast("Topic already tracked");
     }
-    const category = newTopicCategory;
     const tomb = topics.find((t) => t.deleted && t.name.toLowerCase() === name.toLowerCase());
     const nt = tomb
       ? topics.map((t) =>
@@ -1208,7 +1375,6 @@ export default function App() {
       : [...topics, { id: `${Date.now()}`, name, category, addedAt: nowISO(), updatedAt: nowISO() }];
     setTopics(nt);
     persist("ss2_topics", nt);
-    setNewTopic("");
     showToast(`Tracking “${name}” — building search…`);
     // live injection across all engines; AI expands the topic into a
     // small search strategy first (synonyms, subtopics, arXiv category)
@@ -1283,6 +1449,14 @@ export default function App() {
     } catch {
       showToast("Live fetch failed — daily harvest will cover it");
     }
+  }
+
+  async function addTopic(e) {
+    e.preventDefault();
+    const name = newTopic.trim();
+    if (!name) return;
+    await performAddTopic(name, newTopicCategory);
+    setNewTopic("");
   }
 
   function removeTopic(id) {
@@ -2053,25 +2227,70 @@ export default function App() {
 
       {tab === "saved" && (
         <main>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10, gap: 10 }}>
+            {Object.keys(saved).length > 0 ? (
+              <div className="chiprow" role="group" aria-label="Saved category" style={{ margin: 0, flexGrow: 1, overflowX: "auto" }}>
+                {["all", ...CATEGORIES].map((c) => (
+                  <button
+                    key={c}
+                    className={`chip${savedCategory === c ? " on" : ""}`}
+                    onClick={() => updateSettings({ savedCategory: c })}
+                  >
+                    {c.toUpperCase()}
+                  </button>
+                ))}
+              </div>
+            ) : (
+              <div style={{ flexGrow: 1 }}></div>
+            )}
+            <button
+              className="chip"
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 4,
+                flexShrink: 0,
+                borderColor: "var(--teal-border)",
+                color: "var(--teal)",
+                background: "var(--teal-bg)",
+                border: "1px solid var(--teal-border)"
+              }}
+              onClick={() => {
+                setUploadUrl("");
+                setUploadResult(null);
+                setUploadSheet(true);
+              }}
+              title="Add paper manually"
+            >
+              <Plus size={14} /> ADD PAPER
+            </button>
+          </div>
+
           {Object.keys(saved).length > 0 && (
-            <div className="chiprow" role="group" aria-label="Saved category">
-              {["all", ...CATEGORIES].map((c) => (
+            <div className="chiprow" role="group" aria-label="Saved status filter" style={{ marginBottom: 6 }}>
+              {[
+                ["all", "ALL STATUS"],
+                ["unread", "UNREAD ONLY"],
+                ["read", "READ ONLY"],
+              ].map(([f, label]) => (
                 <button
-                  key={c}
-                  className={`chip${savedCategory === c ? " on" : ""}`}
-                  onClick={() => updateSettings({ savedCategory: c })}
+                  key={f}
+                  className={`chip${savedReadFilter === f ? " on" : ""}`}
+                  onClick={() => updateSettings({ savedReadFilter: f })}
                 >
-                  {c.toUpperCase()}
+                  {label}
                 </button>
               ))}
             </div>
           )}
+
           {savedList.length > 1 && (
-            <div className="chiprow" role="group" aria-label="Sort saved">
+            <div className="chiprow" role="group" aria-label="Sort saved" style={{ marginBottom: 12 }}>
               {[
                 ["recent", "RECENT"],
                 ["year", "YEAR"],
                 ["title", "A–Z"],
+                ["read", "UNREAD FIRST"],
               ].map(([m, label]) => (
                 <button
                   key={m}
@@ -2090,11 +2309,19 @@ export default function App() {
             </div>
           ) : (
             savedList.map((p) => (
-                <div className="row" key={p.id}>
+                <div className={`row${p.readAt ? " read" : ""}`} key={p.id}>
+                  <button
+                    className="read-toggle"
+                    onClick={() => toggleRead(p.id)}
+                    title={p.readAt ? "Mark as unread" : "Mark as read"}
+                    style={{ flexShrink: 0 }}
+                  >
+                    {p.readAt ? <CheckCircle2 size={16} color="var(--teal)" /> : <Circle size={16} color="var(--dim)" />}
+                  </button>
                   <div className="grow">
                     <div className="title">{p.title}</div>
                     <div className="sub">
-                      {p.year} · {String(p.venue || "").slice(0, 40)}
+                      {p.year} · {String(p.venue || "").slice(0, 40)}{p.readAt ? " · READ" : ""}
                     </div>
                     {analyses[p.id] && expanded[p.id] && (
                       <div className="analysis" style={{ marginTop: 8 }}>
@@ -2792,6 +3019,242 @@ export default function App() {
                 <Send size={15} />
               </button>
             </form>
+          </div>
+        </div>
+      )}
+
+      {uploadSheet && (
+        <div className="share-overlay" onClick={() => setUploadSheet(false)}>
+          <div className="share-sheet" onClick={(e) => e.stopPropagation()} style={{ maxHeight: "90vh", overflowY: "auto" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+              <div className="section-h" style={{ margin: 0 }}>
+                Upload Paper Manually
+              </div>
+              <button onClick={() => setUploadSheet(false)} style={{ background: "none", border: "none", cursor: "pointer", color: "var(--dim)" }}>
+                <X size={20} />
+              </button>
+            </div>
+
+            {uploadResult === null && (
+              <div>
+                <p className="hint" style={{ marginBottom: 12 }}>
+                  Paste a paper URL (DOI, arXiv, Semantic Scholar, or publisher page) to auto-fill its metadata.
+                </p>
+                <div className="field">
+                  <label>Paper URL</label>
+                  <input
+                    className="input"
+                    placeholder="https://doi.org/... or https://arxiv.org/abs/..."
+                    value={uploadUrl}
+                    onChange={(e) => setUploadUrl(e.target.value)}
+                  />
+                </div>
+                <div style={{ display: "flex", gap: 10, marginTop: 16 }}>
+                  <button
+                    className="btn skip"
+                    onClick={() => {
+                      setUploadResult("form");
+                      setUploadForm({ title: "", authors: "", abstract: "", year: new Date().getFullYear().toString(), venue: "" });
+                    }}
+                  >
+                    Enter Manually
+                  </button>
+                  <button
+                    className="btn save"
+                    onClick={() => fetchMetadata()}
+                    disabled={uploadLoading}
+                  >
+                    {uploadLoading ? "Fetching..." : "Fetch Metadata"}
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {uploadResult === "form" && (
+              <div>
+                <p className="hint" style={{ marginBottom: 12 }}>
+                  Review and edit the paper details before saving.
+                </p>
+                <div className="field">
+                  <label>Title *</label>
+                  <input
+                    className="input"
+                    value={uploadForm.title}
+                    onChange={(e) => setUploadForm({ ...uploadForm, title: e.target.value })}
+                    required
+                  />
+                </div>
+                <div className="field">
+                  <label>Authors (comma separated)</label>
+                  <input
+                    className="input"
+                    placeholder="e.g. John Doe, Jane Smith"
+                    value={uploadForm.authors}
+                    onChange={(e) => setUploadForm({ ...uploadForm, authors: e.target.value })}
+                  />
+                </div>
+                <div className="field">
+                  <label>Venue (Journal / Conference)</label>
+                  <input
+                    className="input"
+                    placeholder="e.g. Nature Physics"
+                    value={uploadForm.venue}
+                    onChange={(e) => setUploadForm({ ...uploadForm, venue: e.target.value })}
+                  />
+                </div>
+                <div className="field">
+                  <label>Year</label>
+                  <input
+                    className="input"
+                    type="number"
+                    value={uploadForm.year}
+                    onChange={(e) => setUploadForm({ ...uploadForm, year: e.target.value })}
+                  />
+                </div>
+                <div className="field">
+                  <label>Abstract</label>
+                  <textarea
+                    className="input"
+                    rows={4}
+                    style={{ fontFamily: "inherit", resize: "vertical" }}
+                    value={uploadForm.abstract}
+                    onChange={(e) => setUploadForm({ ...uploadForm, abstract: e.target.value })}
+                  />
+                </div>
+                <div style={{ display: "flex", gap: 10, marginTop: 16 }}>
+                  <button
+                    className="btn skip"
+                    onClick={() => setUploadResult(null)}
+                  >
+                    Back
+                  </button>
+                  <button
+                    className="btn save"
+                    onClick={saveManualPaper}
+                    disabled={uploadLoading}
+                  >
+                    {uploadLoading ? "Saving..." : "Confirm & Save"}
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {uploadResult === "done" && (
+              <div>
+                <div style={{ background: "var(--teal-bg)", border: "1px solid var(--teal-border)", padding: 12, borderRadius: 10, marginBottom: 16 }}>
+                  <h4 style={{ color: "var(--teal)", margin: "0 0 4px", fontSize: 14, fontWeight: 700 }}>✓ Saved successfully</h4>
+                  <div style={{ fontSize: 13, fontWeight: 600, color: "var(--ink)", lineHeight: 1.3 }}>{uploadForm.title}</div>
+                  <div className="sub" style={{ marginTop: 4 }}>
+                    {uploadForm.year} · {uploadForm.venue || "Manual Upload"}
+                  </div>
+                </div>
+
+                <div style={{ marginBottom: 16 }}>
+                  <div className="field" style={{ margin: "0 0 6px" }}>
+                    <label>Suggested Topics</label>
+                  </div>
+                  {suggestedTopicsLoading ? (
+                    <div className="hint">Generating suggestions...</div>
+                  ) : suggestedTopics.length === 0 ? (
+                    <div className="hint">No new topics to suggest (or already tracking all).</div>
+                  ) : (
+                    <div>
+                      <p className="hint" style={{ marginBottom: 8 }}>
+                        Add related topics to build future daily harvest runs:
+                      </p>
+                      <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                        {suggestedTopics.map(t => (
+                          <button
+                            key={t}
+                            className="chip"
+                            style={{
+                              display: "flex",
+                              alignItems: "center",
+                              gap: 4,
+                              background: "var(--panel-2)",
+                              color: "var(--ink)",
+                              cursor: "pointer"
+                            }}
+                            onClick={() => addSuggestedTopic(t)}
+                          >
+                            <Plus size={12} color="var(--dim)" /> {t}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {journalStatus && (
+                  <div style={{ marginBottom: 16, borderTop: "1px solid var(--line)", paddingTop: 16 }}>
+                    <div className="field" style={{ margin: "0 0 6px" }}>
+                      <label>Journal Settings</label>
+                    </div>
+                    {journalStatus.status === "tracked" && (
+                      <div className="hint" style={{ color: "var(--teal)" }}>
+                        ✓ "{journalStatus.name}" is already a tracked search source.
+                      </div>
+                    )}
+                    {journalStatus.status === "inactive" && (
+                      <div>
+                        <p className="hint" style={{ marginBottom: 8 }}>
+                          "{journalStatus.name}" matches a built-in search publication, but it is currently disabled.
+                        </p>
+                        <button
+                          className="btn proxy-btn"
+                          style={{ padding: "8px 12px", fontSize: 12, borderRadius: 8, flex: "none", width: "auto" }}
+                          onClick={() => enableTrackedJournal(journalStatus.id)}
+                        >
+                          Enable "{journalStatus.name}"
+                        </button>
+                      </div>
+                    )}
+                    {journalStatus.status === "untracked" && (
+                      <div>
+                        <p className="hint" style={{ marginBottom: 8 }}>
+                          "{journalStatus.name}" is not in your science search list. Add its RSS feed URL to include it in daily harvests:
+                        </p>
+                        <div style={{ display: "flex", gap: 8 }}>
+                          <input
+                            className="input"
+                            placeholder="https://journal-website.com/feed.xml"
+                            value={customRssUrl}
+                            onChange={(e) => setCustomRssUrl(e.target.value)}
+                            style={{ flex: 1 }}
+                          />
+                          <button
+                            className="chip on"
+                            style={{
+                              display: "flex",
+                              alignItems: "center",
+                              gap: 4,
+                              flexShrink: 0,
+                              borderColor: "var(--teal-border)",
+                              color: "var(--teal)",
+                              background: "var(--teal-bg)",
+                              border: "1px solid var(--teal-border)"
+                            }}
+                            onClick={addCustomRssFeed}
+                          >
+                            Add Feed
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 24 }}>
+                  <button
+                    className="btn save"
+                    style={{ flex: "none", width: 100 }}
+                    onClick={() => setUploadSheet(false)}
+                  >
+                    Done
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
         </div>
       )}

@@ -722,3 +722,24 @@ main { animation: fadein 0.18s ease; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }
 }
+
+
+/* ── manual paper upload & read status (Features A & B) ── */
+.row.read .title {
+  color: var(--dim) !important;
+  opacity: 0.65;
+}
+.read-toggle {
+  background: none;
+  border: none;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4px;
+  border-radius: 4px;
+  transition: opacity 0.15s, background 0.15s;
+}
+.read-toggle:hover {
+  background: var(--panel-2);
+}
