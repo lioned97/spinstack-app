@@ -75,6 +75,7 @@ export default function PaperCard({
   onSetLightbox,
   onLoadFigures,
   onRelated,
+  skipLabel = "Skip",
 }) {
   const isNew = (p.harvestedAt || "") > (lastSeen || "");
   const an = analyses[p.id];
@@ -204,7 +205,7 @@ export default function PaperCard({
         {!deck && (
           <>
             <button className="btn skip" onClick={() => onVerdict(p, false)}>
-              <X size={15} style={{ verticalAlign: "-3px" }} /> Skip
+              <X size={15} style={{ verticalAlign: "-3px" }} /> {skipLabel}
             </button>
             <button className="btn save" onClick={() => onVerdict(p, true)}>
               <Heart size={15} style={{ verticalAlign: "-3px" }} /> Save

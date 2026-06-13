@@ -307,6 +307,67 @@ function normTitle(t) {
   return t.replace(/[^a-z0-9]+/g, "").slice(0, 80);
 }
 
+const SEARCH_STOPWORDS = new Set([
+  ...GENERIC_TERMS,
+  "about", "after", "before", "between", "from", "into", "over", "paper",
+  "their", "these", "this", "through", "under", "with", "without",
+]);
+
+function normalizeSearchQuery(query) {
+  return String(query || "").trim().replace(/\s+/g, " ");
+}
+
+function recommendedSearchOf(savedPapers, topics, searchHistory) {
+  const papers = [...savedPapers]
+    .filter((p) => p?.title)
+    .sort((a, b) => (b.savedAt || "").localeCompare(a.savedAt || ""))
+    .slice(0, 30);
+  if (!papers.length) return "";
+
+  const recent = new Set(
+    searchHistory.map((entry) => normalizeSearchQuery(entry?.query).toLowerCase())
+  );
+  const candidates = new Map();
+  const addCandidate = (query, score) => {
+    const clean = normalizeSearchQuery(query);
+    const key = clean.toLowerCase();
+    if (!clean || recent.has(key)) return;
+    const prev = candidates.get(key);
+    candidates.set(key, { query: prev?.query || clean, score: (prev?.score || 0) + score });
+  };
+
+  for (const topic of topics) {
+    if (!topic?.name || topic.deleted || topic.hidden) continue;
+    const matches = papers.filter(
+      (paper) =>
+        catOf(paper) === (topic.category || "science") &&
+        topicRelevant(`${paper.title} ${paper.abstract || ""}`, topic.name)
+    ).length;
+    if (matches) addCandidate(topic.name, matches * 8);
+  }
+
+  papers.forEach((paper, paperIndex) => {
+    const recencyWeight = Math.max(1, 4 - Math.floor(paperIndex / 8));
+    for (const method of paper.methods || []) addCandidate(method, recencyWeight + 2);
+
+    const tokens =
+      String(paper.title || "")
+        .toLowerCase()
+        .match(/[a-z0-9]+(?:-[a-z0-9]+)*/g)
+        ?.filter((word) => word.length >= 3 && !SEARCH_STOPWORDS.has(word)) || [];
+    for (let i = 0; i < tokens.length - 1; i += 1) {
+      addCandidate(`${tokens[i]} ${tokens[i + 1]}`, recencyWeight);
+    }
+    if (tokens.length) addCandidate(tokens.slice(0, 3).join(" "), 1);
+  });
+
+  return (
+    [...candidates.values()].sort(
+      (a, b) => b.score - a.score || a.query.localeCompare(b.query)
+    )[0]?.query || ""
+  );
+}
+
 function clientDedupe(papers) {
   if (!Array.isArray(papers)) return [];
   const byKey = new Map();
@@ -687,7 +748,8 @@ export default function App() {
   const [relatedView, setRelatedView] = useState(null); // {paper, loading, items} overlay
   const [searchSheet, setSearchSheet] = useState(false); // "search for a paper" input sheet
   const [searchQuery, setSearchQuery] = useState("");
-  const [searchView, setSearchView] = useState(null); // {query, loading, items} results overlay
+  const [searchView, setSearchView] = useState(null); // {query, loading, items, reviewed} overlay
+  const [searchHistory, setSearchHistory] = useState(() => sGet("ss2_search_history", []));
   // manual paper upload & read tracking states (Features A & B)
   const [uploadSheet, setUploadSheet] = useState(false);
   const [uploadUrl, setUploadUrl] = useState("");
@@ -1122,6 +1184,19 @@ export default function App() {
     return list.sort((a, b) => (b.savedAt || "").localeCompare(a.savedAt || ""));
   }, [saved, savedSort, savedCategory, savedReadFilter]);
 
+  const recentSearches = useMemo(
+    () =>
+      [...searchHistory]
+        .filter((entry) => normalizeSearchQuery(entry?.query))
+        .sort((a, b) => (b.at || "").localeCompare(a.at || ""))
+        .slice(0, 4),
+    [searchHistory]
+  );
+  const recommendedSearch = useMemo(
+    () => recommendedSearchOf(Object.values(saved), topics, searchHistory),
+    [saved, topics, searchHistory]
+  );
+
   const newCount = useMemo(
     () => triage.filter((p) => (p.harvestedAt || "") > (lastSeen || "")).length,
     [triage, lastSeen]
@@ -1447,10 +1522,19 @@ export default function App() {
   // Keyword paper search (item 3): query the live engines and show matches
   // as cards in a results overlay, where they can be saved / read / attached.
   async function runPaperSearch(query) {
-    const q = (query || "").trim();
+    const q = normalizeSearchQuery(query);
     if (!q) return;
+    const searchEntry = { query: q, at: nowISO() };
+    const nextHistory = [
+      searchEntry,
+      ...searchHistory.filter(
+        (entry) => normalizeSearchQuery(entry?.query).toLowerCase() !== q.toLowerCase()
+      ),
+    ].slice(0, 20);
+    setSearchHistory(nextHistory);
+    persist("ss2_search_history", nextHistory);
     setSearchSheet(false);
-    setSearchView({ query: q, loading: true, items: [] });
+    setSearchView({ query: q, loading: true, items: [], reviewed: 0 });
     try {
       const [sci, travel] = await Promise.allSettled([
         fetchScienceTopic({ name: q }),
@@ -1463,14 +1547,26 @@ export default function App() {
       for (const p of out) if (p?.id && !byId.has(p.id)) byId.set(p.id, p);
       const items = [...byId.values()]
         .map((p) => ({ ...p, _score: scoreCard(p, visibleTopics, affinity) }))
-        .sort((a, b) => b._score - a._score)
-        .slice(0, 40);
-      setSearchView({ query: q, loading: false, items });
+        .sort((a, b) => b._score - a._score);
+      setSearchView({ query: q, loading: false, items, reviewed: 0 });
       if (items.length === 0) showToast("No papers found for that search");
     } catch {
-      setSearchView({ query: q, loading: false, items: [] });
+      setSearchView({ query: q, loading: false, items: [], reviewed: 0 });
       showToast("Search failed — check connection");
     }
+  }
+
+  function searchVerdict(paper, kept) {
+    verdict(paper, kept);
+    setSearchView((current) =>
+      current
+        ? {
+            ...current,
+            items: current.items.filter((item) => item.id !== paper.id),
+            reviewed: (current.reviewed || 0) + 1,
+          }
+        : current
+    );
   }
 
   async function saveManualPaper() {
@@ -3228,8 +3324,8 @@ export default function App() {
               Search for a paper
             </div>
             <p className="hint" style={{ marginTop: 0 }}>
-              Searches arXiv, OpenAlex, Semantic Scholar (and travel sources) live. Save any result
-              to keep it.
+              Searches arXiv, OpenAlex, Semantic Scholar (and travel sources) live. Results stay
+              unsaved until you choose Save on a card.
             </p>
             <form
               className="chat-input"
@@ -3255,6 +3351,45 @@ export default function App() {
                 <SearchIcon size={15} style={{ verticalAlign: "-3px" }} /> Search
               </button>
             </form>
+            {(recentSearches.length > 0 || recommendedSearch) && (
+              <div className="search-suggestions">
+                {recentSearches.length > 0 && (
+                  <>
+                    <div className="search-suggestion-label">Recent searches</div>
+                    <div className="chips">
+                      {recentSearches.map((entry) => (
+                        <button
+                          key={`${entry.query}|${entry.at}`}
+                          className="chip"
+                          type="button"
+                          onClick={() => {
+                            setSearchQuery(entry.query);
+                            runPaperSearch(entry.query);
+                          }}
+                        >
+                          {entry.query}
+                        </button>
+                      ))}
+                    </div>
+                  </>
+                )}
+                {recommendedSearch && (
+                  <>
+                    <div className="search-suggestion-label">Recommended from saved papers</div>
+                    <button
+                      className="chip recommended-search"
+                      type="button"
+                      onClick={() => {
+                        setSearchQuery(recommendedSearch);
+                        runPaperSearch(recommendedSearch);
+                      }}
+                    >
+                      <Sparkles size={13} /> {recommendedSearch}
+                    </button>
+                  </>
+                )}
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -3280,11 +3415,23 @@ export default function App() {
               ))
             ) : searchView.items.length === 0 ? (
               <div className="empty">
-                <div className="big">No papers found</div>
-                Try different keywords, or add it directly from the SAVED tab → Add paper.
+                <div className="big">
+                  {searchView.reviewed ? "All results reviewed" : "No papers found"}
+                </div>
+                {searchView.reviewed
+                  ? "Run another search when you are ready."
+                  : "Try different keywords, or add it directly from the SAVED tab → Add paper."}
               </div>
             ) : (
-              searchView.items.map((p) => <PaperCard key={p.id} p={p} {...cardProps} />)
+              searchView.items.map((p) => (
+                <PaperCard
+                  key={p.id}
+                  p={p}
+                  {...cardProps}
+                  onVerdict={searchVerdict}
+                  skipLabel="Discard"
+                />
+              ))
             )}
           </div>
         </div>

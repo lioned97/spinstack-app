@@ -713,6 +713,35 @@ main { animation: fadein 0.18s ease; }
 }
 .share-sheet a:hover { text-decoration: none; }
 
+.search-suggestions {
+  border-top: 1px solid var(--line);
+  margin-top: 4px;
+  padding-top: 10px;
+}
+.search-suggestion-label {
+  color: var(--dim);
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  margin: 4px 0 7px;
+  text-transform: uppercase;
+}
+.share-sheet .search-suggestions .chips {
+  margin: 0 0 10px;
+}
+.share-sheet .search-suggestions .chip {
+  border: 1px solid var(--line);
+  padding: 6px 10px;
+  text-align: left;
+}
+.share-sheet .search-suggestions .recommended-search {
+  align-items: center;
+  color: var(--teal);
+  display: inline-flex;
+  gap: 6px;
+  width: fit-content;
+}
+
 .spin { animation: rot 1s linear infinite; }
 @keyframes rot { to { transform: rotate(360deg); } }
 

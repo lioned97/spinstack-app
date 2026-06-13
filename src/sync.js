@@ -40,6 +40,7 @@ export const SYNC_KEYS = [
   "ss2_ink", // {paperId: [{id, page: n|"board", color, w, pts, deleted?, at}]} — drawings
   "ss2_last_seen", // ISO timestamp — newest harvest the user has seen
   "ss2_swipe_log", // [{id, kept, at}] capped log
+  "ss2_search_history", // [{query, at}] newest unique paper searches
 ];
 
 const sGet = (k, fallback) => {
@@ -195,6 +196,24 @@ function mergeSnapshots(local, remote) {
     })
     .sort((a, b) => (b.at || "").localeCompare(a.at || ""))
     .slice(0, 500);
+
+  // search history: newest occurrence per normalized query, capped at 20
+  const searches = new Map();
+  for (const entry of [
+    ...(remote.ss2_search_history || []),
+    ...(local.ss2_search_history || []),
+  ]) {
+    const query = String(entry?.query || "").trim().replace(/\s+/g, " ");
+    if (!query) continue;
+    const key = query.toLowerCase();
+    const prev = searches.get(key);
+    if (!prev || (entry.at || "") >= (prev.at || "")) {
+      searches.set(key, { query, at: entry.at || "" });
+    }
+  }
+  out.ss2_search_history = [...searches.values()]
+    .sort((a, b) => (b.at || "").localeCompare(a.at || ""))
+    .slice(0, 20);
 
   return out;
 }
