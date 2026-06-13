@@ -258,8 +258,8 @@ export default function PaperCard({
             <Landmark size={15} style={{ verticalAlign: "-3px" }} />
           </button>
         )}
-        {/* Attach your own PDF — always available unless one is already uploaded */}
-        {!isWebMedia && !p.pdfLocal && (
+        {/* Attach is the fallback when this card has no readable PDF. */}
+        {!isWebMedia && !canRead(p) && (
           <button
             className="btn ghost"
             onClick={() => onPickPdf(p)}

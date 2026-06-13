@@ -134,6 +134,24 @@ const nowISO = () => new Date().toISOString();
 
 const catOf = (x) => (x && x.category) || "science";
 
+const canonicalScienceVenue = (venue) => {
+  const normalized = venue.toLowerCase();
+  if (normalized === "nature communications") return "Nature Communications";
+  if (normalized === "nature physics") return "Nature Physics";
+  if (normalized === "physical review letters") return "Physical Review Letters";
+  if (normalized === "science" || normalized === "science (new york, n.y.)") return "Science";
+  if (normalized.startsWith("proceedings of the national academy of sciences")) return "PNAS";
+  return venue;
+};
+
+const filterSourceOf = (item) => {
+  const source = String(item?.source || "").trim();
+  const venue = String(item?.venue || "").trim();
+  return catOf(item) === "science" && venue
+    ? canonicalScienceVenue(venue)
+    : source || venue;
+};
+
 // Persist the device-local paper pool. Figures are base64 image data —
 // far too big for the ~5MB localStorage quota on mobile, and not needed
 // for the offline feed (they re-fetch on demand), so strip them before
@@ -781,10 +799,21 @@ export default function App() {
     return (settings.feedFilter || []).filter((n) => names.has(n.toLowerCase()));
   }, [settings.feedFilter, chipTopics]);
 
-  const sourceFilter = settings.sourceFilter || [];
+  // Journal feeds share internal source IDs, so filter by the publication
+  // name shown on the card (for example, Nature Communications).
+  const poolSources = useMemo(
+    () => [...new Set(pool.map(filterSourceOf).filter(Boolean))].sort(),
+    [pool]
+  );
+  const sourceFilter = useMemo(
+    () => (settings.sourceFilter || []).filter((source) => poolSources.includes(source)),
+    [settings.sourceFilter, poolSources]
+  );
   const filteredTriage = useMemo(() => {
     let list = categoryTriage;
-    if (sourceFilter.length) list = list.filter((p) => sourceFilter.includes(p.source));
+    if (sourceFilter.length) {
+      list = list.filter((paper) => sourceFilter.includes(filterSourceOf(paper)));
+    }
     if (feedFilter.length === 0) return list;
     const wanted = feedFilter.map((n) => n.toLowerCase());
     return list.filter((p) => {
@@ -792,12 +821,6 @@ export default function App() {
       return wanted.some((n) => text.includes(n));
     });
   }, [categoryTriage, feedFilter, sourceFilter]);
-
-  // sources present in the pool (P3b)
-  const poolSources = useMemo(
-    () => [...new Set(pool.map((p) => p.source).filter(Boolean))].sort(),
-    [pool]
-  );
 
   function toggleSource(s) {
     const all = poolSources;
