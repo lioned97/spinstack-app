@@ -74,7 +74,7 @@ const CATEGORY_ANCHORS = {
   travel: {},
 };
 
-const THEME_COLORS = { dark: "#0a0e12", light: "#f4f6f8" };
+const THEME_COLORS = { dark: "#121316", light: "#faf9fa" };
 
 const SOURCE_LABELS = {
   arxiv: "arXiv",
@@ -1952,7 +1952,7 @@ export default function App() {
                       </div>
                     </div>
                     <button onClick={() => verdict(p, true)} title="Save" aria-label={`Save ${p.title}`}>
-                      <Heart size={15} color="var(--red)" />
+                      <Heart size={15} color="var(--teal)" />
                     </button>
                     {p.url && (
                       <a href={p.url} target="_blank" rel="noreferrer" aria-label="Open">

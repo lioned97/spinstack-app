@@ -40,7 +40,7 @@ function OdmrDip({ score }) {
   return (
     <div className="odmr" aria-label={`Relevance ${score.toFixed(2)}`}>
       <svg viewBox="0 0 100 26" preserveAspectRatio="none">
-        <path d={d} stroke="var(--red)" strokeWidth="1.6" fill="none" vectorEffect="non-scaling-stroke" />
+        <path d={d} stroke="var(--teal)" strokeWidth="1.6" fill="none" vectorEffect="non-scaling-stroke" />
         <line x1="0" y1={yBase} x2="100" y2={yBase} stroke="var(--line)" strokeWidth="0.5" />
       </svg>
       <div className="lbl">
@@ -104,7 +104,7 @@ export default function PaperCard({
         {cat === "science" && p.venue && String(p.venue).toLowerCase() !== String(p.source || "").toLowerCase() && (
           <span>· {String(p.venue).slice(0, 36)}</span>
         )}
-        {isNew && <span style={{ color: "var(--red)" }}>· NEW</span>}
+        {isNew && <span className="new-flag">NEW</span>}
       </div>
       {layout.thumb && imgs.length > 0 && !open ? (
         <div className="thumbrow">

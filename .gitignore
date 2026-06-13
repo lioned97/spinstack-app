@@ -1,2 +1,5 @@
 node_modules/
 dist/
+
+# design mockups (reference only, not part of the build)
+new design/

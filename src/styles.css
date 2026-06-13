@@ -1,46 +1,60 @@
-/* ── SpinStack v2 — instrument panel ──
-   bg        #0a0e12  lab dark
-   panel     #11161d  card surface
-   line      #1e2630  hairline
-   ink       #e8edf2  primary text
-   dim       #8a97a6  secondary text
-   nv-red    #ff5a57  signal / relevance (NV 637 nm fluorescence)
-   teal      #4dd8c7  system chrome / sync
+/* ── SpinStack — "Alexandria" editorial design system ──
+   A scholarly, premium reading experience: Noto Serif headlines, Inter
+   body, Public Sans labels. Hierarchy through tonal surface tiers, not
+   hairlines. Primary = scholarly blue, Tertiary = archival gold.
+   --teal/--red variable NAMES are kept (the JSX references them) but now
+   carry the Alexandria primary (blue) and error (red) roles, so the whole
+   app re-skins through these tokens.
 */
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
 
+/* default = Obsidian (dark). data-theme is always set explicitly by JS;
+   :root here is the dark fallback. */
 :root {
-  --bg: #0a0e12;
-  --panel: #11161d;
-  --panel-2: #161d26;
-  --line: #1e2630;
-  --ink: #e8edf2;
-  --dim: #8a97a6;
-  --red: #ff5a57;
-  --teal: #4dd8c7;
-  --teal-bg: rgba(77, 216, 199, 0.08);
-  --teal-border: rgba(77, 216, 199, 0.35);
-  --red-border: rgba(255, 90, 87, 0.5);
-  --tabs-bg: rgba(10, 14, 18, 0.92);
-  --mono: ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Code", Menlo, Consolas, monospace;
-  --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --bg: #121316;
+  --panel: #1e1f22;            /* card surface (container-lowest) */
+  --panel-2: #2a2b2e;          /* raised surface (container-high) */
+  --line: rgba(228, 226, 228, 0.10);
+  --ink: #e4e2e4;
+  --dim: #b4b7c4;
+  --red: #ffb4ab;              /* error / skip */
+  --teal: #b1c5ff;             /* PRIMARY accent (links, relevance, AI) */
+  --teal-bg: rgba(177, 197, 255, 0.14);
+  --teal-border: rgba(177, 197, 255, 0.40);
+  --red-border: rgba(255, 180, 171, 0.45);
+  --tabs-bg: rgba(18, 19, 22, 0.82);
+  --primary-fill: #3366cc;     /* contained primary button fill */
+  --on-primary: #ffffff;
+  --gold: #dcc661;             /* tertiary text/icon (archival gold) */
+  --gold-fill: #dcc661;        /* badge background */
+  --gold-bg: rgba(220, 198, 97, 0.16);
+  --on-gold: #211b00;
+  --serif: "Noto Serif", Georgia, "Times New Roman", serif;
+  --mono: "Public Sans", ui-sans-serif, system-ui, sans-serif;  /* label feel */
+  --sans: "Inter", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
 }
 
-/* light instrument panel — same variables, set by data-theme on <html> */
+/* Ivory (light) — Modern Light */
 :root[data-theme="light"] {
-  --bg: #f4f6f8;
+  --bg: #faf9fa;
   --panel: #ffffff;
-  --panel-2: #eef1f4;
-  --line: #d9dfe6;
-  --ink: #16202b;
-  --dim: #536577;
-  --red: #c8403d;
-  --teal: #0c8d80;
-  --teal-bg: rgba(12, 141, 128, 0.14);
-  --teal-border: rgba(12, 141, 128, 0.45);
-  --red-border: rgba(200, 64, 61, 0.55);
-  --tabs-bg: rgba(244, 246, 248, 0.92);
+  --panel-2: #ececef;
+  --line: rgba(27, 28, 29, 0.10);
+  --ink: #1b1c1d;
+  --dim: #434653;
+  --red: #ba1a1a;
+  --teal: #094cb2;
+  --teal-bg: rgba(9, 76, 178, 0.10);
+  --teal-border: rgba(9, 76, 178, 0.32);
+  --red-border: rgba(186, 26, 26, 0.40);
+  --tabs-bg: rgba(255, 255, 255, 0.82);
+  --primary-fill: #094cb2;
+  --on-primary: #ffffff;
+  --gold: #6d5e00;
+  --gold-fill: #f9e37a;
+  --gold-bg: rgba(109, 94, 0, 0.10);
+  --on-gold: #211b00;
 }
 
 html, body, #root { height: 100%; }
@@ -51,6 +65,8 @@ body {
   -webkit-font-smoothing: antialiased;
   overscroll-behavior-y: none;
 }
+
+h1, h2, h3, .serif { font-family: var(--serif); }
 
 button { font: inherit; color: inherit; background: none; border: none; cursor: pointer; }
 button:focus-visible, input:focus-visible { outline: 2px solid var(--teal); outline-offset: 2px; }
@@ -81,62 +97,74 @@ a:hover { text-decoration: underline; }
 
 .badge {
   font-family: var(--mono); font-size: 11px;
-  background: var(--red); color: #fff;
-  border-radius: 999px; padding: 1px 7px; font-weight: 600;
+  background: var(--gold-fill); color: var(--on-gold);
+  border-radius: 999px; padding: 2px 9px; font-weight: 700;
+  letter-spacing: 0.02em;
 }
 
-/* ── tab bar (bottom, thumb-reachable) ── */
+/* ── tab bar (bottom, thumb-reachable) — glass, rounded-top ── */
 .tabs {
   position: fixed; bottom: 0; left: 0; right: 0; z-index: 30;
-  display: flex; justify-content: center; gap: 4px;
-  padding: 8px 10px calc(8px + env(safe-area-inset-bottom));
+  display: flex; justify-content: space-around; gap: 4px;
+  padding: 8px 10px calc(10px + env(safe-area-inset-bottom));
   background: var(--tabs-bg);
-  backdrop-filter: blur(10px);
-  border-top: 1px solid var(--line);
+  backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px);
+  border-top-left-radius: 22px; border-top-right-radius: 22px;
+  box-shadow: 0 -8px 28px rgba(0, 0, 0, 0.12);
 }
 .tabs button {
   display: flex; flex-direction: column; align-items: center; gap: 3px;
-  padding: 6px 11px; border-radius: 10px;
-  color: var(--dim); font-size: 10.5px; font-family: var(--mono);
-  letter-spacing: 0.03em;
+  padding: 6px 12px; border-radius: 999px;
+  color: var(--dim); font-size: 10px; font-family: var(--mono); font-weight: 600;
+  letter-spacing: 0.08em; text-transform: uppercase;
+  transition: color 0.15s, background 0.15s;
 }
 .tabs button.on { color: var(--teal); background: var(--teal-bg); }
 .tabs button .nbadge {
   position: absolute; transform: translate(16px, -4px);
-  background: var(--red); color: #fff; border-radius: 999px;
+  background: var(--gold-fill); color: var(--on-gold); border-radius: 999px;
   font-size: 9px; padding: 0 5px; font-weight: 700;
 }
 .tabs button { position: relative; }
 
-/* ── paper card ── */
+/* ── paper card ── (no hairlines: elevation via surface tier) */
 .card {
   background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 16px;
-  padding: 20px;
+  border: none;
+  border-radius: 14px;
+  padding: 22px 20px;
   margin-bottom: 16px;
 }
 .card .eyebrow {
   display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
-  font-family: var(--mono); font-size: 10.5px; color: var(--dim);
-  letter-spacing: 0.06em; text-transform: uppercase; margin-bottom: 8px;
+  font-family: var(--mono); font-size: 11px; color: var(--dim);
+  letter-spacing: 0.04em; margin-bottom: 12px;
 }
-.card .eyebrow .src { color: var(--teal); }
-.card h2 { font-size: 18px; font-weight: 600; line-height: 1.35; margin-bottom: 8px; }
-.card .authors { font-size: 14px; color: var(--dim); margin-bottom: 12px; }
-.card .summary { font-size: 15px; line-height: 1.6; color: var(--ink); }
-.card .abstract { font-size: 14px; line-height: 1.6; color: var(--dim); margin-top: 10px; }
+/* category label → archival pill */
+.card .eyebrow .src {
+  color: var(--teal); background: var(--teal-bg);
+  padding: 2px 9px; border-radius: 5px;
+  font-size: 10px; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase;
+}
+.card h2 {
+  font-family: var(--serif); font-size: 21px; font-weight: 600;
+  line-height: 1.3; letter-spacing: -0.01em; margin-bottom: 10px;
+}
+.card .authors { font-size: 14px; color: var(--dim); margin-bottom: 14px; font-weight: 500; }
+.card .summary { font-family: var(--serif); font-size: 15.5px; line-height: 1.65; color: var(--ink); }
+.card .abstract { font-family: var(--serif); font-size: 14.5px; line-height: 1.65; color: var(--dim); margin-top: 10px; }
 
-.chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
 .chip {
-  font-family: var(--mono); font-size: 11.5px;
-  border: 1px solid var(--line); color: var(--dim);
-  border-radius: 999px; padding: 4px 10px;
+  font-family: var(--mono); font-size: 12px; font-weight: 500;
+  border: none; color: var(--dim); background: var(--panel-2);
+  border-radius: 999px; padding: 5px 12px;
 }
-.chip.method { border-color: var(--teal-border); color: var(--teal); }
+.chip.method { color: var(--gold); background: var(--gold-bg, var(--panel-2)); }
 .chip.default {
-  border-color: var(--teal-border); color: var(--teal);
+  color: var(--teal); background: var(--teal-bg);
   margin-left: 8px; font-size: 9px; padding: 2px 7px; vertical-align: 2px;
+  letter-spacing: 0.1em;
 }
 /* any selected chip highlights — works in the filter/sort sheet too, not
    only inside a .chiprow */
@@ -164,7 +192,7 @@ a:hover { text-decoration: underline; }
   font-family: var(--mono); font-size: 10px; color: var(--dim);
   letter-spacing: 0.08em; margin-top: 2px;
 }
-.odmr .lbl b { color: var(--red); font-weight: 600; }
+.odmr .lbl b { color: var(--teal); font-weight: 700; }
 
 /* ── card actions ── */
 .actions { display: flex; gap: 8px; margin-top: 14px; flex-wrap: wrap; }
@@ -172,14 +200,17 @@ a:hover { text-decoration: underline; }
 .btn {
   flex: 1; padding: 13px 0; border-radius: 10px;
   font-size: 14px; font-weight: 600; text-align: center;
-  border: 1px solid var(--line); background: var(--panel-2);
-  transition: transform 0.08s;
+  border: none; background: var(--panel-2); color: var(--ink);
+  transition: transform 0.08s, opacity 0.15s;
 }
 .btn:active { transform: scale(0.97); }
-.btn.save { border-color: var(--red-border); color: var(--red); }
-.btn.skip { color: var(--dim); }
-.btn.ghost { flex: 0 0 auto; padding: 13px 14px; color: var(--teal); }
-.btn.proxy-btn { flex: 1 1 100%; color: var(--teal); border-color: var(--teal-border); }
+/* Save = primary contained (the positive action gets the focus) */
+.btn.save { background: var(--primary-fill); color: var(--on-primary); }
+.btn.save:hover { opacity: 0.9; }
+/* Skip = quiet ghost */
+.btn.skip { background: transparent; color: var(--dim); box-shadow: inset 0 0 0 1px var(--line); }
+.btn.ghost { flex: 0 0 auto; padding: 13px 14px; background: transparent; color: var(--teal); }
+.btn.proxy-btn { flex: 1 1 100%; background: var(--teal-bg); color: var(--teal); }
 .btn[disabled] { opacity: 0.45; cursor: default; }
 
 .analysis {
@@ -205,19 +236,24 @@ a:hover { text-decoration: underline; }
   font-size: 13px; font-weight: 700; letter-spacing: 0.1em;
   padding: 4px 10px; border-radius: 8px; pointer-events: none;
 }
-.deck .verdict.keep { right: 26px; color: var(--red); border: 2px solid var(--red); transform: rotate(8deg); }
+.deck .verdict.keep { right: 26px; color: var(--teal); border: 2px solid var(--teal); transform: rotate(8deg); }
 .deck .verdict.skip { left: 26px; color: var(--dim); border: 2px solid var(--dim); transform: rotate(-8deg); }
 .deck-meta {
   font-family: var(--mono); font-size: 11px; color: var(--dim);
   text-align: center; margin-bottom: 10px; letter-spacing: 0.06em;
 }
 
-/* ── mode toggle ── */
+/* ── mode toggle / segmented pills (view mode, category, theme, provider) ── */
 .mode {
-  display: inline-flex; border: 1px solid var(--line); border-radius: 999px; overflow: hidden;
+  display: inline-flex; gap: 6px; flex-wrap: wrap;
+  background: var(--panel-2); border-radius: 999px; padding: 3px;
 }
-.mode button { padding: 5px 12px; font-family: var(--mono); font-size: 11px; color: var(--dim); }
-.mode button.on { background: var(--panel-2); color: var(--teal); }
+.mode button {
+  padding: 6px 14px; border-radius: 999px;
+  font-family: var(--mono); font-size: 11px; font-weight: 600; color: var(--dim);
+  letter-spacing: 0.04em; transition: background 0.15s, color 0.15s;
+}
+.mode button.on { background: var(--primary-fill); color: var(--on-primary); }
 
 /* ── lists, forms, settings ── */
 .row {
@@ -256,9 +292,9 @@ a:hover { text-decoration: underline; }
 }
 
 .section-h {
-  font-family: var(--mono); font-size: 11px; color: var(--dim);
-  text-transform: uppercase; letter-spacing: 0.1em;
-  margin: 22px 0 8px;
+  font-family: var(--mono); font-size: 11px; color: var(--gold);
+  text-transform: uppercase; letter-spacing: 0.18em; font-weight: 700;
+  margin: 24px 0 10px;
 }
 
 /* ── category switcher (Stack) ── */
@@ -283,7 +319,7 @@ a:hover { text-decoration: underline; }
 }
 .map-canvas { flex: 1; }
 .map-pin {
-  background: var(--red); border: 2px solid #fff; border-radius: 50%;
+  background: var(--primary-fill); border: 2px solid #fff; border-radius: 50%;
   box-shadow: 0 1px 4px rgba(0, 0, 0, 0.45);
 }
 .leaflet-popup-content { font-family: var(--sans); font-size: 13px; line-height: 1.4; }
@@ -322,7 +358,13 @@ a:hover { text-decoration: underline; }
   font-family: var(--mono); font-size: 10px; color: var(--dim);
   letter-spacing: 0.08em; margin-top: 12px;
 }
-.match-lbl b { color: var(--red); font-weight: 600; }
+.match-lbl b { color: var(--teal); font-weight: 700; }
+/* "NEW" flag on cards → archival gold pill */
+.new-flag {
+  background: var(--gold-bg); color: var(--gold);
+  font-weight: 700; letter-spacing: 0.1em; font-size: 9px;
+  padding: 2px 7px; border-radius: 5px;
+}
 
 textarea.input { font: inherit; resize: vertical; line-height: 1.5; }
 
