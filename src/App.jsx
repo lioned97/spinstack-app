@@ -30,6 +30,7 @@ import {
 import { sGet, persist, onSyncStatus } from "./sync.js";
 import { savePdf, loadPdf } from "./pdfstore.js";
 import PaperCard from "./PaperCard.jsx";
+import { sourceNameOf } from "./sourceUtils.js";
 
 // pdf.js / leaflet ride in their own chunks — loaded on first use
 const Reader = React.lazy(() => import("./Reader.jsx"));
@@ -133,24 +134,6 @@ const SORT_LABELS = {
 const nowISO = () => new Date().toISOString();
 
 const catOf = (x) => (x && x.category) || "science";
-
-const canonicalScienceVenue = (venue) => {
-  const normalized = venue.toLowerCase();
-  if (normalized === "nature communications") return "Nature Communications";
-  if (normalized === "nature physics") return "Nature Physics";
-  if (normalized === "physical review letters") return "Physical Review Letters";
-  if (normalized === "science" || normalized === "science (new york, n.y.)") return "Science";
-  if (normalized.startsWith("proceedings of the national academy of sciences")) return "PNAS";
-  return venue;
-};
-
-const filterSourceOf = (item) => {
-  const source = String(item?.source || "").trim();
-  const venue = String(item?.venue || "").trim();
-  return catOf(item) === "science" && venue
-    ? canonicalScienceVenue(venue)
-    : source || venue;
-};
 
 // Persist the device-local paper pool. Figures are base64 image data —
 // far too big for the ~5MB localStorage quota on mobile, and not needed
@@ -799,37 +782,134 @@ export default function App() {
     return (settings.feedFilter || []).filter((n) => names.has(n.toLowerCase()));
   }, [settings.feedFilter, chipTopics]);
 
-  // Journal feeds share internal source IDs, so filter by the publication
-  // name shown on the card (for example, Nature Communications).
-  const poolSources = useMemo(
-    () => [...new Set(pool.map(filterSourceOf).filter(Boolean))].sort(),
-    [pool]
+  // Use the same journal/outlet names shown on cards, kept independently
+  // for Science and Travel. Missing category selection means "all".
+  const sourcesByCategory = useMemo(() => {
+    const grouped = Object.fromEntries(CATEGORIES.map((category) => [category, new Set()]));
+    for (const item of pool) {
+      const category = catOf(item);
+      if (grouped[category]) grouped[category].add(sourceNameOf(item));
+    }
+    return Object.fromEntries(
+      CATEGORIES.map((category) => [category, [...grouped[category]].filter(Boolean).sort()])
+    );
+  }, [pool]);
+  const sourceSelections = useMemo(() => {
+    const configured =
+      settings.sourceFilters && typeof settings.sourceFilters === "object"
+        ? settings.sourceFilters
+        : null;
+    const legacy = !configured && Array.isArray(settings.sourceFilter)
+      ? settings.sourceFilter
+      : [];
+
+    return Object.fromEntries(
+      CATEGORIES.map((category) => {
+        const available = sourcesByCategory[category];
+        const stored = configured && Object.prototype.hasOwnProperty.call(configured, category)
+          ? configured[category]
+          : legacy.length
+            ? legacy
+            : null;
+        const selected = Array.isArray(stored)
+          ? stored.filter((source) => available.includes(source))
+          : available;
+        return [category, selected];
+      })
+    );
+  }, [settings.sourceFilter, settings.sourceFilters, sourcesByCategory]);
+  const visibleSourceCategories =
+    activeCategory === "all" ? CATEGORIES : [activeCategory];
+  const populatedSourceCategories = visibleSourceCategories.filter(
+    (category) => sourcesByCategory[category].length > 0
   );
-  const sourceFilter = useMemo(
-    () => (settings.sourceFilter || []).filter((source) => poolSources.includes(source)),
-    [settings.sourceFilter, poolSources]
+  const sourceFilterActive = visibleSourceCategories.some(
+    (category) =>
+      sourcesByCategory[category].length > 0 &&
+      sourceSelections[category].length !== sourcesByCategory[category].length
   );
+  const allVisibleSourcesSelected =
+    populatedSourceCategories.length > 0 &&
+    populatedSourceCategories.every(
+      (category) =>
+        sourceSelections[category].length === sourcesByCategory[category].length
+    );
+  const sourceFilterSummary = visibleSourceCategories
+    .filter(
+      (category) =>
+        sourcesByCategory[category].length > 0 &&
+        sourceSelections[category].length !== sourcesByCategory[category].length
+    )
+    .map((category) => {
+      const selected = sourceSelections[category];
+      return `${category === "science" ? "Science" : "Travel"}: ${
+        selected.length ? selected.join(", ") : "none"
+      }`;
+    })
+    .join("; ");
   const filteredTriage = useMemo(() => {
     let list = categoryTriage;
-    if (sourceFilter.length) {
-      list = list.filter((paper) => sourceFilter.includes(filterSourceOf(paper)));
-    }
+    list = list.filter((paper) =>
+      sourceSelections[catOf(paper)].includes(sourceNameOf(paper))
+    );
     if (feedFilter.length === 0) return list;
     const wanted = feedFilter.map((n) => n.toLowerCase());
     return list.filter((p) => {
       const text = `${p.title} ${p.abstract || ""}`.toLowerCase();
       return wanted.some((n) => text.includes(n));
     });
-  }, [categoryTriage, feedFilter, sourceFilter]);
+  }, [categoryTriage, feedFilter, sourceSelections]);
 
-  function toggleSource(s) {
-    const all = poolSources;
-    const current = sourceFilter.length ? sourceFilter : all;
-    const next = current.includes(s) ? current.filter((x) => x !== s) : [...current, s];
-    // everything checked = no filter; never allow an empty set (= show nothing)
-    updateSettings({
-      sourceFilter: next.length === 0 || next.length >= all.length ? [] : next,
-    });
+  function currentSourceFilters() {
+    if (settings.sourceFilters && typeof settings.sourceFilters === "object") {
+      return { ...settings.sourceFilters };
+    }
+    const migrated = {};
+    if (Array.isArray(settings.sourceFilter) && settings.sourceFilter.length) {
+      for (const category of CATEGORIES) {
+        const selected = sourceSelections[category];
+        if (selected.length !== sourcesByCategory[category].length) {
+          migrated[category] = selected;
+        }
+      }
+    }
+    return migrated;
+  }
+
+  function persistSourceFilters(sourceFilters) {
+    const { sourceFilter: _legacySourceFilter, ...currentSettings } = settings;
+    const next = { ...currentSettings, sourceFilters, updatedAt: nowISO() };
+    setSettings(next);
+    persist("ss2_settings", next);
+  }
+
+  function setCategorySourceSelection(category, selected) {
+    const sourceFilters = currentSourceFilters();
+    if (selected.length >= sourcesByCategory[category].length) {
+      delete sourceFilters[category];
+    } else {
+      sourceFilters[category] = selected;
+    }
+    persistSourceFilters(sourceFilters);
+  }
+
+  function toggleSource(category, source) {
+    const selected = sourceSelections[category];
+    setCategorySourceSelection(
+      category,
+      selected.includes(source)
+        ? selected.filter((item) => item !== source)
+        : [...selected, source]
+    );
+  }
+
+  function toggleAllVisibleSources() {
+    const sourceFilters = currentSourceFilters();
+    for (const category of populatedSourceCategories) {
+      if (allVisibleSourcesSelected) sourceFilters[category] = [];
+      else delete sourceFilters[category];
+    }
+    persistSourceFilters(sourceFilters);
   }
 
   // feed sort (A3): deck always uses relevance (filteredTriage order)
@@ -1763,17 +1843,17 @@ export default function App() {
       {tab === "stack" && (
         <div className="toolbar">
           <button
-            className={`chip${feedFilter.length || sourceFilter.length ? " on" : ""}`}
+            className={`chip${feedFilter.length || sourceFilterActive ? " on" : ""}`}
             onClick={() => setFilterSheet(true)}
             aria-label="Filter and sort"
           >
             <FilterIcon size={11} style={{ verticalAlign: "-1px" }} /> FILTER
-            {feedFilter.length + (sourceFilter.length ? 1 : 0) > 0 &&
-              ` · ${feedFilter.length + (sourceFilter.length ? 1 : 0)}`}
+            {feedFilter.length + (sourceFilterActive ? 1 : 0) > 0 &&
+              ` · ${feedFilter.length + (sourceFilterActive ? 1 : 0)}`}
           </button>
           <span style={{ position: "relative" }}>
             <button
-              className={`chip${sourceFilter.length ? " on" : ""}`}
+              className={`chip${sourceFilterActive ? " on" : ""}`}
               onClick={() => setSourcePop((v) => !v)}
               aria-label="Filter by source"
             >
@@ -1781,15 +1861,32 @@ export default function App() {
             </button>
             {sourcePop && (
               <div className="source-popover">
-                {poolSources.map((s) => (
-                  <label key={s}>
-                    <input
-                      type="checkbox"
-                      checked={!sourceFilter.length || sourceFilter.includes(s)}
-                      onChange={() => toggleSource(s)}
-                    />
-                    {SOURCE_LABELS[s] || s}
-                  </label>
+                <div className="source-popover-actions">
+                  <button
+                    className="btn ghost"
+                    type="button"
+                    onClick={toggleAllVisibleSources}
+                    disabled={populatedSourceCategories.length === 0}
+                  >
+                    {allVisibleSourcesSelected ? "Deselect all" : "Select all"}
+                  </button>
+                </div>
+                {populatedSourceCategories.map((category) => (
+                  <div className="source-popover-group" key={category}>
+                    <div className="source-popover-title">{category}</div>
+                    <div className="source-popover-options">
+                      {sourcesByCategory[category].map((source) => (
+                        <label key={`${category}:${source}`}>
+                          <input
+                            type="checkbox"
+                            checked={sourceSelections[category].includes(source)}
+                            onChange={() => toggleSource(category, source)}
+                          />
+                          {source}
+                        </label>
+                      ))}
+                    </div>
+                  </div>
                 ))}
               </div>
             )}
@@ -1808,16 +1905,26 @@ export default function App() {
       )}
 
       {tab === "stack" &&
-        (sortMode !== "relevance" || feedFilter.length > 0 || sourceFilter.length > 0) && (
+        (sortMode !== "relevance" || feedFilter.length > 0 || sourceFilterActive) && (
           <div className="active-readout">
             <span>Sorted by <b>{SORT_LABELS[sortMode] || "RELEVANCE"}</b></span>
             {feedFilter.length > 0 && (
               <span>· Topics: <b>{feedFilter.join(", ")}</b></span>
             )}
-            {sourceFilter.length > 0 && (
-              <span>· Sources: <b>{sourceFilter.map((s) => SOURCE_LABELS[s] || s).join(", ")}</b></span>
+            {sourceFilterActive && (
+              <span>· Sources: <b>{sourceFilterSummary}</b></span>
             )}
-            <button className="clear-link" onClick={() => updateSettings({ sortMode: "relevance", feedFilter: [], sourceFilter: [] })}>
+            <button
+              className="clear-link"
+              onClick={() =>
+                updateSettings({
+                  sortMode: "relevance",
+                  feedFilter: [],
+                  sourceFilter: [],
+                  sourceFilters: {},
+                })
+              }
+            >
               clear
             </button>
           </div>
@@ -2362,16 +2469,18 @@ export default function App() {
               <button
                 className="btn ghost"
                 type="button"
-                onClick={() => updateSettings({ scienceSources: ALL_SCIENCE_PUBLICATION_IDS })}
+                onClick={() =>
+                  updateSettings({
+                    scienceSources:
+                      selectedScienceSources.length === SCIENCE_PUBLICATIONS.length
+                        ? []
+                        : ALL_SCIENCE_PUBLICATION_IDS,
+                  })
+                }
               >
-                Mark all
-              </button>
-              <button
-                className="btn ghost"
-                type="button"
-                onClick={() => updateSettings({ scienceSources: [] })}
-              >
-                Unmark all
+                {selectedScienceSources.length === SCIENCE_PUBLICATIONS.length
+                  ? "Deselect all"
+                  : "Select all"}
               </button>
               <span className="readout">
                 {selectedScienceSources.length}/{SCIENCE_PUBLICATIONS.length} active

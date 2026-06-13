@@ -599,13 +599,31 @@ textarea.input { font: inherit; resize: vertical; line-height: 1.5; }
   background: var(--panel); border: 1px solid var(--line);
   border-radius: 12px; padding: 10px 12px;
   box-shadow: 0 8px 28px rgba(0, 0, 0, 0.4);
-  display: grid; grid-template-columns: 1fr 1fr; gap: 6px 16px;
-  min-width: 280px;
+  display: flex; flex-direction: column; gap: 10px;
+  min-width: 320px; max-width: min(560px, calc(100vw - 24px));
+  max-height: min(70vh, 620px); overflow-y: auto;
 }
 .source-popover label {
   font-family: var(--mono); font-size: 11px;
   color: var(--ink); display: flex; align-items: center; gap: 6px; cursor: pointer;
   white-space: nowrap;
+}
+.source-popover-actions {
+  display: flex; justify-content: flex-end;
+  padding-bottom: 8px; border-bottom: 1px solid var(--line);
+}
+.source-popover-group { display: flex; flex-direction: column; gap: 7px; }
+.source-popover-title {
+  font-family: var(--mono); font-size: 10px; font-weight: 700;
+  color: var(--gold); letter-spacing: 0.12em; text-transform: uppercase;
+}
+.source-popover-options {
+  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px 16px;
+}
+@media (max-width: 540px) {
+  .source-popover { min-width: min(320px, calc(100vw - 24px)); }
+  .source-popover-options { grid-template-columns: 1fr; }
 }
 .row-actions { display: flex; gap: 8px; align-items: center; flex-shrink: 0; }
 .topic-editor { display: flex; flex-direction: column; gap: 8px; width: 100%; padding: 4px 0; }

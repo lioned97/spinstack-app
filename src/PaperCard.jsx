@@ -20,6 +20,7 @@ import {
 } from "lucide-react";
 
 import { isPaywalled } from "./publisherUtils.js";
+import { sourceNameOf } from "./sourceUtils.js";
 
 const catOf = (x) => (x && x.category) || "science";
 
@@ -85,10 +86,7 @@ export default function PaperCard({
   const isVideo = p.mediaType === "video";
   const isArticle = p.mediaType === "article";
   const isWebMedia = isVideo || isArticle;
-  const primarySource =
-    cat === "science" && (p.mediaType === "journal" || p.mediaType === "article")
-      ? p.venue || p.source || "publication"
-      : p.source || p.venue || "paper";
+  const primarySource = sourceNameOf(p);
 
   // figure extraction (once per device): eagerly for the top of the feed
   // and the deck card so closed cards show figures too, lazily on "More"
@@ -106,12 +104,9 @@ export default function PaperCard({
         <span className="src">
           {cat === "science"
             ? primarySource
-            : `${cat} · ${p.source || p.venue || ""}`}
+            : `${cat} · ${primarySource}`}
         </span>
         <span>{p.year}</span>
-        {cat === "science" && p.venue && String(p.venue).toLowerCase() !== String(primarySource).toLowerCase() && (
-          <span>· {String(p.venue).slice(0, 36)}</span>
-        )}
         {isNew && <span className="new-flag">NEW</span>}
       </div>
       {isWebMedia && imgs.length > 0 && (
