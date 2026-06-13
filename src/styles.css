@@ -335,6 +335,27 @@ a:hover { text-decoration: underline; }
 .subrow .sub { font-family: var(--mono); font-size: 10.5px; color: var(--dim); margin-top: 1px; }
 
 /* ── travel card: thumbnail + carousel + MATCH label ── */
+.media-preview {
+  position: relative; display: block; overflow: hidden;
+  width: 100%; aspect-ratio: 16 / 9; margin: 2px 0 12px;
+  border: 1px solid var(--line); border-radius: 12px;
+  background: var(--panel-2);
+}
+.media-preview img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.media-preview.video::after {
+  content: ""; position: absolute; inset: 0;
+  background: linear-gradient(180deg, transparent 48%, rgba(0, 0, 0, 0.42));
+}
+.play-badge {
+  position: absolute; z-index: 1; left: 50%; top: 50%;
+  width: 54px; height: 38px; transform: translate(-50%, -50%);
+  display: inline-flex; align-items: center; justify-content: center;
+  color: #fff; background: var(--red); border-radius: 11px;
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.35);
+}
+.media-title { color: inherit; text-decoration: none; }
+.media-title:hover { color: var(--teal); text-decoration: none; }
+.btn.media-link { color: var(--teal); border-color: var(--teal-border); }
 .thumbrow { display: flex; gap: 12px; align-items: flex-start; margin-bottom: 6px; }
 .thumbrow img.thumb {
   width: 84px; height: 84px; flex: 0 0 auto;

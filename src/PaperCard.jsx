@@ -16,6 +16,7 @@ import {
   Share2,
   ExternalLink,
   Network,
+  Play,
 } from "lucide-react";
 
 import { isPaywalled } from "./publisherUtils.js";
@@ -81,6 +82,9 @@ export default function PaperCard({
   const layout = CATEGORY_LAYOUTS[cat] || CATEGORY_LAYOUTS.science;
   const imgs = (p.images || []).filter(Boolean);
   const score = p._score ?? 1;
+  const isVideo = p.mediaType === "video";
+  const isArticle = p.mediaType === "article";
+  const isWebMedia = isVideo || isArticle;
 
   // figure extraction (once per device): eagerly for the top of the feed
   // and the deck card so closed cards show figures too, lazily on "More"
@@ -106,7 +110,29 @@ export default function PaperCard({
         )}
         {isNew && <span className="new-flag">NEW</span>}
       </div>
-      {layout.thumb && imgs.length > 0 && !open ? (
+      {isWebMedia && imgs.length > 0 && (
+        <a
+          className={`media-preview ${isVideo ? "video" : "article"}`}
+          href={p.url}
+          target="_blank"
+          rel="noreferrer"
+          aria-label={`${isVideo ? "Watch" : "Read"} ${p.title}`}
+        >
+          <img src={imgs[0]} loading="lazy" alt="" />
+          {isVideo && (
+            <span className="play-badge" aria-hidden="true">
+              <Play size={24} fill="currentColor" />
+            </span>
+          )}
+        </a>
+      )}
+      {isWebMedia ? (
+        <h2>
+          <a className="media-title" href={p.url} target="_blank" rel="noreferrer">
+            {p.title}
+          </a>
+        </h2>
+      ) : layout.thumb && imgs.length > 0 && !open ? (
         <div className="thumbrow">
           <img className="thumb" src={imgs[0]} loading="lazy" alt="" />
           <h2>{p.title}</h2>
@@ -120,7 +146,7 @@ export default function PaperCard({
           {(p.authors || []).length > 4 ? " et al." : ""}
         </div>
       )}
-      {open && layout.carousel && imgs.length > 0 && (
+      {open && layout.carousel && !isWebMedia && imgs.length > 0 && (
         <div className="carousel">
           {imgs.slice(0, 5).map((src) => (
             <img key={src} src={src} loading="lazy" alt="" />
@@ -200,26 +226,36 @@ export default function PaperCard({
             More
           </button>
         )}
+        {isVideo && (
+          <a className="btn ghost media-link" href={p.url} target="_blank" rel="noreferrer">
+            <Play size={15} style={{ verticalAlign: "-3px" }} /> Watch
+          </a>
+        )}
+        {isArticle && (
+          <a className="btn ghost media-link" href={p.url} target="_blank" rel="noreferrer">
+            <BookOpen size={15} style={{ verticalAlign: "-3px" }} /> Read article
+          </a>
+        )}
         {/* Read the resolved PDF (arXiv / uploaded / open-access) */}
-        {canRead(p) && (
+        {!isWebMedia && canRead(p) && (
           <button className="btn ghost" onClick={() => onOpenReader(p)} title="Read PDF" aria-label="Read PDF">
             <BookOpen size={15} style={{ verticalAlign: "-3px" }} />
           </button>
         )}
         {/* Paywalled + proxy configured → prominent "Open via library" CTA */}
-        {!canRead(p) && settings.libraryProxy && p.url && isPaywalled(p) && (
+        {!isWebMedia && !canRead(p) && settings.libraryProxy && p.url && isPaywalled(p) && (
           <button className="btn proxy-btn" onClick={() => onOpenProxy(p)}>
             <Landmark size={15} style={{ verticalAlign: "-3px" }} />{" "}
             {settings.proxyLabel ? `Open via ${settings.proxyLabel}` : "Open via library"}
           </button>
         )}
-        {!canRead(p) && settings.libraryProxy && p.url && !isPaywalled(p) && (
+        {!isWebMedia && !canRead(p) && settings.libraryProxy && p.url && !isPaywalled(p) && (
           <button className="btn ghost" onClick={() => onOpenProxy(p)} title="Open via library" aria-label="Open via library">
             <Landmark size={15} style={{ verticalAlign: "-3px" }} />
           </button>
         )}
         {/* Attach your own PDF — always available unless one is already uploaded */}
-        {!p.pdfLocal && (
+        {!isWebMedia && !p.pdfLocal && (
           <button
             className="btn ghost"
             onClick={() => onPickPdf(p)}
@@ -240,7 +276,7 @@ export default function PaperCard({
         <button className="btn ghost" onClick={() => onShare(p)} title="Share" aria-label="Share">
           <Share2 size={15} style={{ verticalAlign: "-3px" }} />
         </button>
-        {p.url && (
+        {p.url && !isWebMedia && (
           <a className="btn ghost" href={p.url} target="_blank" rel="noreferrer" title="Open paper">
             <ExternalLink size={15} style={{ verticalAlign: "-3px" }} />
           </a>

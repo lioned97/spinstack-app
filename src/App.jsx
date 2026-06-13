@@ -84,8 +84,10 @@ const SOURCE_LABELS = {
   "openalex-live": "OpenAlex (live)",
   pubmed: "PubMed",
   journal: "Journal feeds",
+  "science-news": "Science articles",
   wikivoyage: "Wikivoyage",
   wikipedia: "Wikipedia",
+  youtube: "YouTube",
   rss: "RSS feeds",
 };
 
@@ -267,6 +269,68 @@ async function fetchWiki(topicName, src) {
     .filter(Boolean);
 }
 
+async function fetchYouTube(topicName) {
+  const res = await fetch(`/api/youtube-search?q=${encodeURIComponent(topicName)}&max=5`);
+  if (!res.ok) return [];
+  const data = await res.json();
+  return (data.videos || [])
+    .map((video) => ({
+      id: `youtube:${video.videoId}`,
+      title: video.title,
+      abstract: [video.channel, video.published, video.duration, video.description]
+        .filter(Boolean)
+        .join(" · "),
+      authors: video.channel ? [video.channel] : [],
+      year: new Date().getFullYear(),
+      venue: "YouTube",
+      url: video.url,
+      images: video.thumbnail ? [video.thumbnail] : [],
+      category: "travel",
+      source: "youtube",
+      mediaType: "video",
+      harvestedAt: nowISO(),
+    }))
+    .filter(qualityFilter);
+}
+
+async function fetchTravelTopic(topicName) {
+  const settled = await Promise.allSettled([
+    ...WIKI_SOURCES.map((src) => fetchWiki(topicName, src)),
+    fetchYouTube(topicName),
+  ]);
+  return settled.flatMap((result) => (result.status === "fulfilled" ? result.value : []));
+}
+
+async function fetchCuratedScience(topicNames, provider) {
+  if (!topicNames.length) return [];
+  const res = await fetch("/api/journal-scan", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ topics: topicNames, provider }),
+  });
+  if (!res.ok) return [];
+  const data = await res.json();
+  return (data.items || [])
+    .map((item) => ({
+      id: item.doi
+        ? `doi:${item.doi.toLowerCase()}`
+        : `${item.mediaType || "journal"}:${item.url}`,
+      title: item.title,
+      abstract: item.abstract || "",
+      authors: item.authors || [],
+      year: item.year,
+      venue: item.venue || "Science source",
+      url: item.url,
+      doi: item.doi || undefined,
+      images: item.image ? [item.image] : [],
+      source: item.mediaType === "article" ? "science-news" : "journal",
+      mediaType: item.mediaType || "journal",
+      category: "science",
+      harvestedAt: nowISO(),
+    }))
+    .filter(qualityFilter);
+}
+
 // arXiv Atom (via our /api/arxiv CORS middleman) → item schema
 function parseArxivAtom(xmlText) {
   const out = [];
@@ -352,6 +416,7 @@ async function fetchScienceTopic(t) {
 function qualityFilter(p) {
   if (!p || !p.id || !p.title) return false;
   if (catOf(p) === "travel") {
+    if (p.mediaType === "video") return !!(p.url && (p.images || []).length);
     const a = p.abstract || "";
     return a.length >= 120 && !a.includes("may refer to");
   }
@@ -450,7 +515,6 @@ export default function App() {
   const [syncStatus, setSyncStatus] = useState("syncing");
   const [loadingFeed, setLoadingFeed] = useState(false);
   const [rerunning, setRerunning] = useState(false);
-  const [scanning, setScanning] = useState(false);
   const [analyzingId, setAnalyzingId] = useState(null);
   const [expanded, setExpanded] = useState({});
   const [newTopic, setNewTopic] = useState("");
@@ -597,14 +661,10 @@ export default function App() {
     const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     try {
       const fresh = [];
-      for (const t of topics.filter((x) => !x.deleted && !x.hidden)) {
+      const activeTopics = topics.filter((x) => !x.deleted && !x.hidden);
+      for (const t of activeTopics) {
         if (catOf(t) === "travel") {
-          // both wikis in parallel — different hosts, no shared rate limit
-          const results = await Promise.allSettled(
-            WIKI_SOURCES.map((src) => fetchWiki(t.name, src))
-          );
-          for (const r of results)
-            if (r.status === "fulfilled") fresh.push(...r.value.filter(qualityFilter));
+          fresh.push(...(await fetchTravelTopic(t.name)));
           await sleep(300);
           continue;
         }
@@ -616,6 +676,12 @@ export default function App() {
         } catch {}
         await sleep(350);
       }
+      const scienceTopics = activeTopics
+        .filter((topic) => catOf(topic) === "science")
+        .map(topicQuery);
+      try {
+        fresh.push(...(await fetchCuratedScience(scienceTopics, aiProvider)));
+      } catch {}
       // re-fetch the harvest feed too
       try {
         const res = await fetch(settings.harvestUrl || HARVEST_URL);
@@ -632,7 +698,7 @@ export default function App() {
       const added = merged.length - before.size;
       setPool(merged);
       savePool(merged);
-      showToast(added > 0 ? `${added} new papers found` : "No new papers found");
+      showToast(added > 0 ? `${added} new items found` : "No new items found");
     } catch {
       showToast("Re-run failed — check connection");
     } finally {
@@ -650,55 +716,6 @@ export default function App() {
   // server pick the first configured one)
   const aiProvider =
     settings.aiProvider && settings.aiProvider !== "auto" ? settings.aiProvider : undefined;
-
-  // Scan Nature-family journals: triage by ABSTRACT (the RSS has no
-  // abstract, so the server pulls it from OpenAlex), keep AI-judged
-  // relevant ones, add them as cards. No PDF — the user attaches one.
-  async function scanJournals() {
-    if (scanning) return;
-    setScanning(true);
-    showToast("Scanning Nature journals…");
-    try {
-      const sci = topics.filter((t) => !t.deleted && !t.hidden && catOf(t) === "science");
-      const topicNames = sci.map((t) => t.name);
-      const res = await fetch("/api/journal-scan", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ topics: topicNames, provider: aiProvider }),
-      });
-      const data = res.ok ? await res.json() : null;
-      const found = (data?.items || [])
-        .map((it) => ({
-          id: it.doi ? `doi:${it.doi.toLowerCase()}` : `nature:${it.url}`,
-          title: it.title,
-          abstract: it.abstract || "",
-          authors: it.authors || [],
-          year: it.year,
-          venue: it.venue || "Nature",
-          url: it.url,
-          doi: it.doi || undefined,
-          source: "nature",
-          category: "science",
-          harvestedAt: nowISO(),
-        }))
-        .filter((p) => p.id && p.title);
-      const before = new Set(pool.map((p) => p.id));
-      const byId = new Map();
-      for (const p of [...found, ...pool]) if (p?.id && !byId.has(p.id)) byId.set(p.id, p);
-      const merged = [...byId.values()];
-      const added = merged.length - before.size;
-      setPool(merged);
-      savePool(merged);
-      if (added > 0) showToast(`Added ${added} relevant Nature paper${added > 1 ? "s" : ""} — attach a PDF to read`);
-      else if (data && (data.note || (data.items || []).length === 0))
-        showToast(data?.note === "abstracts not yet indexed" ? "New articles not indexed yet — try again later" : "No new relevant papers found");
-      else showToast("No new relevant papers found");
-    } catch {
-      showToast("Journal scan failed — check connection");
-    } finally {
-      setScanning(false);
-    }
-  }
 
   // category switcher (B2): "all" | "science" | "travel"
   const activeCategory = settings.activeCategory || "all";
@@ -916,17 +933,22 @@ export default function App() {
           if (!er.ok) return [];
           const { queries, arxivCat } = await er.json();
           const found = [];
-          for (const q of (queries || []).slice(0, 3)) {
+          const searchQueries = (queries || []).slice(0, 3);
+          for (const q of searchQueries) {
             try {
               if (isSci) {
                 const { items } = await fetchScienceTopic({ name: q, arxivCat: arxivCat || undefined });
                 found.push(...items);
               } else {
-                for (const src of WIKI_SOURCES)
-                  found.push(...(await fetchWiki(q, src)).filter(qualityFilter));
+                found.push(...(await fetchTravelTopic(q)));
               }
             } catch {}
             await new Promise((r) => setTimeout(r, 350));
+          }
+          if (isSci) {
+            try {
+              found.push(...(await fetchCuratedScience(searchQueries, aiProvider)));
+            } catch {}
           }
           return found;
         } catch {
@@ -1058,10 +1080,8 @@ export default function App() {
       let fresh = [];
       let toastMsg;
       if (category === "travel") {
-        const results = await Promise.allSettled(WIKI_SOURCES.map((src) => fetchWiki(name, src)));
-        for (const r of results)
-          if (r.status === "fulfilled") fresh.push(...r.value.filter(qualityFilter));
-        toastMsg = `Added ${fresh.length} guides for “${name}”`;
+        fresh = await fetchTravelTopic(name);
+        toastMsg = `Added ${fresh.length} guides and videos for “${name}”`;
       } else {
         let queries = [name];
         let aiCat = null;
@@ -1094,6 +1114,9 @@ export default function App() {
           } catch {}
           await new Promise((r) => setTimeout(r, 350)); // S2 courtesy gap
         }
+        try {
+          fresh.push(...(await fetchCuratedScience(queries, aiProvider)));
+        } catch {}
         if (aiCat) {
           // remember the AI-picked category on the topic — the harvester
           // will scope its arXiv searches with it from the next run
@@ -1113,7 +1136,7 @@ export default function App() {
         toastMsg =
           fresh.length === 0
             ? `No live results for “${name}” — the daily harvest will keep trying. Tip: edit the topic (pencil) to add keywords.`
-            : `Added ${fresh.length} papers (${totals.arxiv} arXiv · ${totals.s2} S2 · ${totals.openalex} OpenAlex)${aiUsed ? " · AI search" : ""}`;
+            : `Added ${fresh.length} science items (${totals.arxiv} arXiv · ${totals.s2} S2 · ${totals.openalex} OpenAlex + journals/articles)${aiUsed ? " · AI search" : ""}`;
       }
       const byId = new Map();
       for (const p of [...fresh, ...pool]) if (p?.id && !byId.has(p.id)) byId.set(p.id, p);
@@ -1962,10 +1985,20 @@ export default function App() {
                           <button
                             onClick={() => {
                               setRowMenu(null);
-                              canRead(p) ? openReader(p) : pickPdfFor(p);
+                              if (p.mediaType === "article" || p.mediaType === "video") {
+                                window.open(p.url, "_blank", "noopener,noreferrer");
+                              } else {
+                                canRead(p) ? openReader(p) : pickPdfFor(p);
+                              }
                             }}
                           >
-                            {canRead(p) ? "Read" : "Attach PDF"}
+                            {p.mediaType === "video"
+                              ? "Watch"
+                              : p.mediaType === "article"
+                                ? "Read article"
+                                : canRead(p)
+                                  ? "Read"
+                                  : "Attach PDF"}
                           </button>
                           <button
                             onClick={() => {
@@ -2087,9 +2120,9 @@ export default function App() {
             </div>
           </div>
           <p className="hint">
-            Science topics fetch from OpenAlex, travel topics from Wikivoyage/Wikipedia — both join
-            the daily harvest from tomorrow. Hidden topics (eye toggle) stay harvested but leave
-            your feed.
+            Science topics search arXiv, Semantic Scholar, OpenAlex, leading journals, and research
+            news. Travel topics search Wikivoyage, Wikipedia, and YouTube. Both join the daily
+            harvest from tomorrow. Hidden topics stay harvested but leave your feed.
           </p>
           {CATEGORIES.map((cat) => {
             const catTopics = liveTopics.filter((t) => catOf(t) === cat);
@@ -2248,20 +2281,11 @@ export default function App() {
             <p className="hint">Daily harvest output (papers/latest.json on GitHub).</p>
           </div>
           <div className="field">
-            <label>Journal scan (Nature)</label>
-            <button
-              className="btn ghost"
-              style={{ border: "1px solid var(--line)" }}
-              disabled={scanning}
-              onClick={scanJournals}
-            >
-              <Newspaper size={14} style={{ verticalAlign: "-2px" }} />{" "}
-              {scanning ? "Scanning…" : "Scan Nature journals for relevant papers"}
-            </button>
+            <label>Built-in science sources</label>
             <p className="hint">
-              Reads the latest Nature, Nature Physics, Nature Communications & Nature Reviews
-              Physics by abstract, keeps the ones AI judges relevant to your science topics, and
-              adds them as cards. They have no PDF — tap the 📎 on a card to attach one.
+              Every regular science search also checks Nature, Science, PNAS, leading Nature and
+              APS physics journals, plus articles from The Quantum Insider, Physics World, Quanta
+              Magazine, and APS Physics.
             </p>
           </div>
           <div className="field">

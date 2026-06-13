@@ -1,186 +1,274 @@
-// /api/journal-scan — abstract-triage for Nature-family journals.
+// /api/journal-scan - curated science journals and research-news articles.
 //
-// Nature RSS lists titles + DOIs but NOT abstracts, so we: (1) fetch the
-// whitelisted feeds, (2) pull each item's abstract from OpenAlex by DOI
-// (server-side, CORS-free), (3) ask the LLM which abstracts are relevant
-// to the user's tracked topics. Returns only the relevant items — the
-// app turns each into a card the user can attach a PDF to manually.
+// The endpoint is called by the normal science search. It fetches a fixed
+// allowlist of respected sources, enriches DOI records with Semantic Scholar
+// abstracts, and returns items relevant to the user's tracked topics.
 
 import { complete } from "./_llm.js";
 
-// whitelist: feed key → { url, venue }. Only these hosts are fetched.
-const FEEDS = {
-  nature: { url: "https://www.nature.com/nature.rss", venue: "Nature" },
-  nphys: { url: "https://www.nature.com/nphys.rss", venue: "Nature Physics" },
-  ncomms: { url: "https://www.nature.com/ncomms.rss", venue: "Nature Communications" },
-  natrevphys: { url: "https://www.nature.com/natrevphys.rss", venue: "Nature Reviews Physics" },
-  nnano: { url: "https://www.nature.com/nnano.rss", venue: "Nature Nanotechnology" },
-  nmat: { url: "https://www.nature.com/nmat.rss", venue: "Nature Materials" },
-};
-const DEFAULT_FEEDS = ["nphys", "nature", "ncomms", "natrevphys"];
-const UA = { "User-Agent": "SpinStack/3.0 (personal research tool)" };
+const SOURCES = [
+  // Broad, high-impact journals.
+  { url: "https://www.nature.com/nature.rss", venue: "Nature", type: "journal" },
+  { url: "https://www.science.org/action/showFeed?type=etoc&feed=rss&jc=science", venue: "Science", type: "journal" },
+  { url: "https://www.science.org/action/showFeed?type=etoc&feed=rss&jc=sciadv", venue: "Science Advances", type: "journal" },
+  { url: "https://www.pnas.org/action/showFeed?type=etoc&feed=rss&jc=pnas", venue: "PNAS", type: "journal" },
 
-const stripTags = (s) =>
-  String(s || "")
+  // Strong matches for NV-center, quantum-sensing, and condensed-matter work.
+  { url: "https://www.nature.com/nphys.rss", venue: "Nature Physics", type: "journal" },
+  { url: "https://www.nature.com/ncomms.rss", venue: "Nature Communications", type: "journal" },
+  { url: "https://www.nature.com/natrevphys.rss", venue: "Nature Reviews Physics", type: "journal" },
+  { url: "https://www.nature.com/nnano.rss", venue: "Nature Nanotechnology", type: "journal" },
+  { url: "https://www.nature.com/nmat.rss", venue: "Nature Materials", type: "journal" },
+  { url: "https://www.nature.com/nphoton.rss", venue: "Nature Photonics", type: "journal" },
+  { url: "https://feeds.aps.org/rss/recent/prl.xml", venue: "Physical Review Letters", type: "journal" },
+  { url: "https://feeds.aps.org/rss/recent/prxquantum.xml", venue: "PRX Quantum", type: "journal" },
+  { url: "https://feeds.aps.org/rss/recent/prapplied.xml", venue: "Physical Review Applied", type: "journal" },
+
+  // Research news and explainers.
+  { url: "https://thequantuminsider.com/feed/", venue: "The Quantum Insider", type: "article" },
+  { url: "https://physicsworld.com/feed/", venue: "Physics World", type: "article" },
+  { url: "https://www.quantamagazine.org/feed/", venue: "Quanta Magazine", type: "article" },
+  { url: "https://physics.aps.org/feed", venue: "APS Physics", type: "article" },
+];
+
+const UA = { "User-Agent": "SpinStack/3.0 (personal research tool)" };
+const STOP_WORDS = new Set([
+  "about", "after", "also", "and", "center", "from", "into", "open", "other",
+  "research", "system", "systems", "that", "the", "their", "this", "using", "with",
+]);
+
+function decodeEntities(value) {
+  return String(value || "")
     .replace(/<!\[CDATA\[|\]\]>/g, "")
+    .replace(/&#x([0-9a-f]+);/gi, (_, n) => String.fromCodePoint(parseInt(n, 16)))
+    .replace(/&#(\d+);/g, (_, n) => String.fromCodePoint(parseInt(n, 10)))
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&#39;|&apos;/g, "'")
+    .replace(/&quot;/g, '"')
+    .replace(/&nbsp;/g, " ");
+}
+
+const stripTags = (value) =>
+  decodeEntities(value)
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
     .replace(/<[^>]+>/g, " ")
-    .replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&#39;/g, "'").replace(/&quot;/g, '"')
     .replace(/\s+/g, " ")
     .trim();
 
-function parseFeed(xml, venueFallback) {
+function pick(body, patterns) {
+  for (const pattern of patterns) {
+    const match = body.match(pattern);
+    if (match) return decodeEntities(match[1]).trim();
+  }
+  return "";
+}
+
+function imageFrom(body) {
+  return pick(body, [
+    /<media:(?:content|thumbnail)[^>]+url=["']([^"']+)["']/i,
+    /<enclosure[^>]+type=["']image\/[^"']+["'][^>]+url=["']([^"']+)["']/i,
+    /<enclosure[^>]+url=["']([^"']+)["'][^>]+type=["']image\//i,
+    /<img[^>]+src=["']([^"']+)["']/i,
+  ]);
+}
+
+function parseFeed(xml, source) {
+  const blocks = [
+    ...xml.split(/<item[\s>]/i).slice(1).map((part) => part.split(/<\/item>/i)[0]),
+    ...xml.split(/<entry[\s>]/i).slice(1).map((part) => part.split(/<\/entry>/i)[0]),
+  ];
   const out = [];
-  const blocks = xml.split(/<item[\s>]/).slice(1);
-  for (const b of blocks) {
-    const body = b.split("</item>")[0];
-    const pick = (re) => {
-      const m = body.match(re);
-      return m ? stripTags(m[1]) : "";
-    };
-    const title = pick(/<title[^>]*>([\s\S]*?)<\/title>/);
-    const doi = pick(/<prism:doi[^>]*>([\s\S]*?)<\/prism:doi>/);
+
+  for (const body of blocks.slice(0, 5)) {
+    const title = stripTags(pick(body, [/<title[^>]*>([\s\S]*?)<\/title>/i]));
+    const description = stripTags(
+      pick(body, [
+        /<content:encoded[^>]*>([\s\S]*?)<\/content:encoded>/i,
+        /<description[^>]*>([\s\S]*?)<\/description>/i,
+        /<summary[^>]*>([\s\S]*?)<\/summary>/i,
+        /<content[^>]*>([\s\S]*?)<\/content>/i,
+      ])
+    );
+    const rawDoi = stripTags(
+      pick(body, [
+        /<prism:doi[^>]*>([\s\S]*?)<\/prism:doi>/i,
+        /<dc:identifier[^>]*>([\s\S]*?)<\/dc:identifier>/i,
+      ])
+    );
+    const doiMatch = `${rawDoi} ${body}`.match(/10\.\d{4,9}\/[-._;()/:a-z0-9]+/i);
+    const doi = doiMatch ? doiMatch[0].replace(/[).,;]+$/, "") : null;
     const url =
-      pick(/<prism:url[^>]*>([\s\S]*?)<\/prism:url>/) ||
-      pick(/<link[^>]*>([\s\S]*?)<\/link>/) ||
+      stripTags(
+        pick(body, [
+          /<prism:url[^>]*>([\s\S]*?)<\/prism:url>/i,
+          /<link[^>]*>([\s\S]*?)<\/link>/i,
+        ])
+      ) ||
+      pick(body, [/<link[^>]+href=["']([^"']+)["']/i]) ||
       (doi ? `https://doi.org/${doi}` : "");
-    const date =
-      pick(/<prism:coverDate[^>]*>([\s\S]*?)<\/prism:coverDate>/) ||
-      pick(/<pubDate[^>]*>([\s\S]*?)<\/pubDate>/) ||
-      pick(/<dc:date[^>]*>([\s\S]*?)<\/dc:date>/);
-    const venue = pick(/<prism:publicationName[^>]*>([\s\S]*?)<\/prism:publicationName>/) || venueFallback;
-    const authors = [...body.matchAll(/<dc:creator[^>]*>([\s\S]*?)<\/dc:creator>/g)]
-      .map((m) => stripTags(m[1]))
+    const date = stripTags(
+      pick(body, [
+        /<prism:coverDate[^>]*>([\s\S]*?)<\/prism:coverDate>/i,
+        /<pubDate[^>]*>([\s\S]*?)<\/pubDate>/i,
+        /<dc:date[^>]*>([\s\S]*?)<\/dc:date>/i,
+        /<updated[^>]*>([\s\S]*?)<\/updated>/i,
+        /<published[^>]*>([\s\S]*?)<\/published>/i,
+      ])
+    );
+    const authors = [
+      ...body.matchAll(/<(?:dc:creator|author)[^>]*>([\s\S]*?)<\/(?:dc:creator|author)>/gi),
+    ]
+      .map((match) => stripTags(match[1]))
       .filter(Boolean);
-    const ym = date.match(/\d{4}/);
-    if (title && (doi || url)) {
-      out.push({ title, doi: doi || null, url, venue, authors, year: ym ? parseInt(ym[0], 10) : null });
+    const yearMatch = date.match(/\b(20\d{2})\b/);
+
+    if (title && url) {
+      out.push({
+        title,
+        abstract: description,
+        authors,
+        year: yearMatch ? Number(yearMatch[1]) : new Date().getFullYear(),
+        venue: source.venue,
+        url,
+        doi,
+        image: imageFrom(body) || null,
+        mediaType: source.type,
+      });
     }
   }
   return out;
 }
 
-function reconstructAbstract(inv) {
+async function fetchText(url) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 5500);
   try {
-    const words = [];
-    Object.entries(inv).forEach(([w, ps]) => ps.forEach((p) => (words[p] = w)));
-    return words.join(" ").replace(/\s+/g, " ").trim();
-  } catch {
-    return "";
+    const response = await fetch(url, { headers: UA, signal: controller.signal });
+    return response.ok ? response.text() : "";
+  } finally {
+    clearTimeout(timer);
   }
 }
 
-export default async function handler(req, res) {
-  if (req.method !== "POST") {
-    console.error("journal-scan:", `method ${req.method} not allowed`);
-    return res.status(405).json({ error: "POST only" });
+async function enrichAbstracts(items) {
+  const doiItems = items.filter((item) => item.doi).slice(0, 80);
+  if (!doiItems.length) return;
+  try {
+    const response = await fetch(
+      "https://api.semanticscholar.org/graph/v1/paper/batch?fields=externalIds,abstract,year,authors",
+      {
+        method: "POST",
+        headers: { ...UA, "Content-Type": "application/json" },
+        body: JSON.stringify({ ids: doiItems.map((item) => `DOI:${item.doi}`) }),
+      }
+    );
+    if (!response.ok) return;
+    const papers = await response.json();
+    papers.forEach((paper, index) => {
+      if (!paper) return;
+      const item = doiItems[index];
+      if (!item.abstract && paper.abstract) item.abstract = paper.abstract;
+      if (paper.year) item.year = paper.year;
+      if (!item.authors.length && paper.authors) {
+        item.authors = paper.authors.map((author) => author.name).filter(Boolean);
+      }
+    });
+  } catch (error) {
+    console.error("journal-scan: Semantic Scholar enrichment failed:", error.message);
   }
-  const { feeds, topics, provider } = req.body || {};
-  const keys = (Array.isArray(feeds) && feeds.length ? feeds : DEFAULT_FEEDS).filter((k) => FEEDS[k]);
-  const topicList = (Array.isArray(topics) ? topics : []).map(String).filter(Boolean).slice(0, 24);
+}
+
+function keywordRelevant(item, topics) {
+  if (!topics.length) return true;
+  const text = `${item.title} ${item.abstract}`.toLowerCase();
+  return topics.some((topic) => {
+    const phrase = topic.toLowerCase().trim();
+    if (phrase && text.includes(phrase)) return true;
+    const tokens = phrase
+      .split(/[^a-z0-9-]+/)
+      .filter((token) => token.length >= 4 && !STOP_WORDS.has(token));
+    return tokens.some((token) => text.includes(token));
+  });
+}
+
+export default async function handler(req, res) {
+  if (req.method !== "POST") return res.status(405).json({ error: "POST only" });
+
+  const { topics, provider } = req.body || {};
+  const topicList = (Array.isArray(topics) ? topics : [])
+    .map((topic) => String(topic).trim())
+    .filter(Boolean)
+    .slice(0, 24);
 
   try {
-    // 1. fetch feeds in parallel
-    const feedResults = await Promise.allSettled(
-      keys.map((k) =>
-        fetch(FEEDS[k].url, { headers: UA }).then((r) => (r.ok ? r.text() : "")).then((xml) => parseFeed(xml, FEEDS[k].venue))
-      )
+    const settled = await Promise.allSettled(
+      SOURCES.map(async (source) => parseFeed(await fetchText(source.url), source))
     );
-    const byKey = new Map();
-    for (const r of feedResults) {
-      if (r.status !== "fulfilled") continue;
-      for (const it of r.value) {
-        const id = (it.doi || it.url).toLowerCase();
-        if (!byKey.has(id)) byKey.set(id, it);
+    const byId = new Map();
+    for (const result of settled) {
+      if (result.status !== "fulfilled") continue;
+      for (const item of result.value) {
+        const id = (item.doi || item.url).toLowerCase();
+        if (!byId.has(id)) byId.set(id, item);
       }
     }
-    let items = [...byKey.values()].slice(0, 40);
-    if (items.length === 0) {
-      console.error("journal-scan:", "no items parsed from feeds", keys.join(","));
-      return res.status(200).json({ scanned: 0, items: [] });
-    }
 
-    // 2. pull abstracts from OpenAlex by DOI (one batched call)
-    const dois = items.filter((i) => i.doi).map((i) => i.doi.toLowerCase());
-    if (dois.length) {
-      try {
-        const oaUrl =
-          `https://api.openalex.org/works?filter=doi:${dois.join("|")}` +
-          `&per_page=${Math.min(dois.length, 50)}&select=doi,abstract_inverted_index,publication_year`;
-        const oaRes = await fetch(oaUrl, { headers: UA });
-        if (oaRes.ok) {
-          const data = await oaRes.json();
-          const absByDoi = {};
-          for (const w of data.results || []) {
-            const d = (w.doi || "").replace("https://doi.org/", "").toLowerCase();
-            if (d && w.abstract_inverted_index) {
-              absByDoi[d] = { abstract: reconstructAbstract(w.abstract_inverted_index), year: w.publication_year };
-            }
-          }
-          for (const it of items) {
-            const hit = it.doi && absByDoi[it.doi.toLowerCase()];
-            if (hit) {
-              it.abstract = hit.abstract;
-              it.year = it.year || hit.year;
-            }
-          }
-        }
-      } catch (e) {
-        console.error("journal-scan:", "OpenAlex abstract fetch failed:", e.message);
-      }
-    }
-    // can only triage items whose abstract we actually have
-    const withAbstract = items.filter((i) => (i.abstract || "").length >= 120);
-    if (withAbstract.length === 0) {
-      return res.status(200).json({ scanned: items.length, items: [], note: "abstracts not yet indexed" });
-    }
+    const items = [...byId.values()].slice(0, 90);
+    await enrichAbstracts(items);
+    const eligible = items.filter(
+      (item) => item.title && (item.abstract.length >= 40 || item.mediaType === "journal")
+    );
+    const candidates = [
+      ...eligible.filter((item) => item.mediaType === "journal").slice(0, 40),
+      ...eligible.filter((item) => item.mediaType === "article").slice(0, 20),
+    ];
 
-    // 3. relevance — one LLM call over the abstracts; keyword fallback
-    let relevantIdx = null;
-    if (topicList.length) {
+    let relevantIndexes = null;
+    if (topicList.length && candidates.length) {
       try {
         const prompt =
           `A researcher tracks these topics: ${topicList.join(", ")}.\n` +
-          "For each numbered paper, decide whether its abstract is genuinely relevant to those topics. " +
-          'Reply with STRICT JSON only: {"relevant": [list of the numbers that are relevant]}.\n\n' +
-          withAbstract
-            .map((it, i) => `[${i}] ${it.title}\n${(it.abstract || "").slice(0, 500)}`)
+          "Select items that are genuinely relevant. Include research-news articles as well as papers. " +
+          'Reply with strict JSON only: {"relevant":[number,...]}.\n\n' +
+          candidates
+            .map(
+              (item, index) =>
+                `[${index}] ${item.mediaType.toUpperCase()} | ${item.venue} | ${item.title}\n` +
+                (item.abstract || "No abstract available.").slice(0, 500)
+            )
             .join("\n\n");
         const text = await complete({
           messages: [{ role: "user", content: prompt }],
-          maxTokens: 200,
+          maxTokens: 260,
           prefer: provider,
         });
         const parsed = JSON.parse(text.replace(/^```(?:json)?|```$/gm, "").trim());
         if (Array.isArray(parsed?.relevant)) {
-          relevantIdx = new Set(parsed.relevant.map((n) => parseInt(n, 10)).filter((n) => !isNaN(n)));
+          relevantIndexes = new Set(
+            parsed.relevant.map((value) => Number(value)).filter(Number.isInteger)
+          );
         }
-      } catch (e) {
-        console.error("journal-scan:", "AI relevance failed, using keyword fallback:", e.message);
+      } catch (error) {
+        console.error("journal-scan: AI relevance failed, using keyword fallback:", error.message);
       }
     }
-    const lowTopics = topicList.map((t) => t.toLowerCase());
-    const keep = withAbstract.filter((it, i) => {
-      if (relevantIdx) return relevantIdx.has(i);
-      if (!lowTopics.length) return true;
-      const blob = `${it.title} ${it.abstract}`.toLowerCase();
-      return lowTopics.some((t) => blob.includes(t));
-    });
+
+    const relevant = candidates
+      .filter((item, index) =>
+        relevantIndexes ? relevantIndexes.has(index) : keywordRelevant(item, topicList)
+      )
+      .slice(0, 30);
 
     return res.status(200).json({
       scanned: items.length,
-      aiFiltered: !!relevantIdx,
-      items: keep.map((it) => ({
-        title: it.title,
-        abstract: it.abstract,
-        authors: it.authors,
-        year: it.year,
-        venue: it.venue,
-        url: it.url,
-        doi: it.doi,
-      })),
+      aiFiltered: !!relevantIndexes,
+      items: relevant,
     });
-  } catch (err) {
-    console.error("journal-scan:", err);
-    return res.status(502).json({ error: `Journal scan failed: ${err.message}` });
+  } catch (error) {
+    console.error("journal-scan:", error);
+    return res.status(502).json({ error: `Science source search failed: ${error.message}` });
   }
 }
