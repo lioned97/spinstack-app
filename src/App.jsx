@@ -204,8 +204,41 @@ function normalizeOpenAlex(r) {
   const title = r.title || r.display_name || "";
   if (!title) return null;
   const year = r.publication_year;
+
+  // Extract DOI without https://doi.org/
+  let doi = r.doi || "";
+  if (doi.startsWith("https://doi.org/")) {
+    doi = doi.replace("https://doi.org/", "");
+  }
+  doi = doi.trim() || null;
+
+  // Extract arXiv ID if present in landing_page_url / pdf_url
+  let arxivId = null;
+  const locations = [r.primary_location || {}, ...(r.locations || [])];
+  for (const loc of locations) {
+    const lp = ((loc.landing_page_url || "") + " " + (loc.pdf_url || "")).toLowerCase();
+    const m = lp.match(/arxiv\.org\/(?:abs|pdf)\/([0-9.]+)/);
+    if (m) {
+      arxivId = m[1];
+      break;
+    }
+  }
+
+  // Format ID
+  let id;
+  if (doi) {
+    id = `doi:${doi.toLowerCase()}`;
+  } else if (arxivId) {
+    id = `arxiv:${arxivId}`;
+  } else {
+    const openalexId = r.ids?.openalex || r.id || "";
+    id = openalexId;
+  }
+
   return {
-    id: r.doi || r.id || `${title.slice(0, 40)}-${year}`,
+    id,
+    arxivId,
+    doi,
     title,
     abstract:
       r.abstract ||
@@ -218,6 +251,83 @@ function normalizeOpenAlex(r) {
     source: "openalex-live",
     harvestedAt: nowISO(),
   };
+}
+
+function normTitle(t) {
+  t = (t || "").toLowerCase();
+  t = t.replace(/[\$\{\}\\]/g, "");
+  return t.replace(/[^a-z0-9]+/g, "").slice(0, 80);
+}
+
+function clientDedupe(papers) {
+  if (!Array.isArray(papers)) return [];
+  const byKey = new Map();
+  const result = [];
+
+  for (const p of papers) {
+    if (!p) continue;
+    const cat = p.category || "science";
+    const keys = [];
+
+    if (cat === "travel") {
+      const u = (p.url || "").toLowerCase();
+      keys.push(`travel:${normTitle(p.title)}|${u}`);
+    } else {
+      let doi = p.doi || "";
+      let arxivId = p.arxivId || "";
+      if (typeof p.id === "string") {
+        if (p.id.startsWith("doi:")) {
+          doi = p.id.slice(4);
+        } else if (p.id.startsWith("arxiv:")) {
+          arxivId = p.id.slice(6);
+        }
+      }
+      if (doi) {
+        keys.push(`doi:${doi.toLowerCase().trim()}`);
+      }
+      if (arxivId) {
+        keys.push(`arxiv:${arxivId.toLowerCase().trim()}`);
+      }
+      keys.push(`title:${normTitle(p.title)}`);
+    }
+
+    let existing = null;
+    for (const key of keys) {
+      if (byKey.has(key)) {
+        existing = byKey.get(key);
+        break;
+      }
+    }
+
+    if (existing) {
+      existing.pdf = existing.pdf ?? p.pdf;
+      existing.pdfLocal = existing.pdfLocal ?? p.pdfLocal;
+      existing.figures = existing.figures ?? p.figures;
+      existing.figuresTried = existing.figuresTried ?? p.figuresTried;
+      existing.coordinates = existing.coordinates ?? p.coordinates;
+      existing.abstract = existing.abstract || p.abstract;
+      existing.summary = existing.summary || p.summary;
+      if (!existing.methods || existing.methods.length === 0) {
+        existing.methods = p.methods;
+      }
+      if (!existing.authors || existing.authors.length === 0) {
+        existing.authors = p.authors;
+      }
+      if (!existing.doi && p.doi) existing.doi = p.doi;
+      if (!existing.arxivId && p.arxivId) existing.arxivId = p.arxivId;
+
+      if (typeof p.id === "string" && (p.id.startsWith("doi:") || p.id.startsWith("arxiv:")) && !(existing.id.startsWith("doi:") || existing.id.startsWith("arxiv:"))) {
+        existing.id = p.id;
+      }
+    } else {
+      byKey.set(keys[0], p);
+      for (const key of keys) {
+        byKey.set(key, p);
+      }
+      result.push(p);
+    }
+  }
+  return result;
 }
 
 // Semantic Scholar live search — normalized like the harvester:
@@ -533,6 +643,7 @@ export default function App() {
   const [suggestedTopicsLoading, setSuggestedTopicsLoading] = useState(false);
   const [journalStatus, setJournalStatus] = useState(null); // { status, name, id }
   const [customRssUrl, setCustomRssUrl] = useState("");
+  const [proxyVerified, setProxyVerified] = useState(false);
 
   const [settings, setSettings] = useState(() =>
     sGet("ss2_settings", {
@@ -662,29 +773,7 @@ export default function App() {
       if (!res.ok) throw new Error(`feed ${res.status}`);
       const raw = await res.json();
       const incoming = (Array.isArray(raw) ? raw : raw.papers || []).filter(qualityFilter);
-      // merge with existing pool (live-injected topic papers survive refresh);
-      // carry over device-local enrichments (figures, resolved pdf) so a
-      // fresh harvest record doesn't clobber them
-      const prevById = new Map(pool.map((x) => [x.id, x]));
-      const byId = new Map();
-      for (const p of [...incoming, ...pool]) {
-        if (!p?.id || byId.has(p.id)) continue;
-        const old = prevById.get(p.id);
-        byId.set(
-          p.id,
-          old && old !== p
-            ? {
-                ...p,
-                pdf: p.pdf ?? old.pdf,
-                pdfLocal: p.pdfLocal ?? old.pdfLocal,
-                figures: p.figures ?? old.figures,
-                figuresTried: p.figuresTried ?? old.figuresTried,
-                coordinates: p.coordinates ?? old.coordinates,
-              }
-            : p
-        );
-      }
-      const merged = [...byId.values()];
+      const merged = clientDedupe([...incoming, ...pool]);
       setPool(merged);
       savePool(merged); // device-local cache, not synced
       if (showStatus) showToast(`${merged.length} papers loaded`);
@@ -738,11 +827,8 @@ export default function App() {
         }
       } catch {}
 
-      const before = new Set(pool.map((p) => p.id));
-      const byId = new Map();
-      for (const p of [...pool, ...fresh]) if (p?.id && !byId.has(p.id)) byId.set(p.id, p);
-      const merged = [...byId.values()];
-      const added = merged.length - before.size;
+      const merged = clientDedupe([...pool, ...fresh]);
+      const added = Math.max(0, merged.length - pool.length);
       setPool(merged);
       savePool(merged);
       showToast(added > 0 ? `${added} new items found` : "No new items found");
@@ -1957,6 +2043,49 @@ export default function App() {
 
   return (
     <div className="app">
+      {settings.libraryProxy && !proxyVerified && (
+        <div
+          style={{
+            background: "var(--teal-bg)",
+            borderBottom: "1px solid var(--teal-border)",
+            padding: "8px 12px",
+            fontSize: "12px",
+            textAlign: "center",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            gap: "10px",
+          }}
+        >
+          <span>Connect/verify your university proxy to access paywalled PDFs:</span>
+          <a
+            href={settings.libraryProxy + encodeURIComponent("https://scholar.google.com")}
+            target="_blank"
+            rel="noopener noreferrer"
+            onClick={() => setProxyVerified(true)}
+            style={{
+              color: "var(--teal)",
+              fontWeight: "bold",
+              textDecoration: "underline",
+            }}
+          >
+            {settings.proxyLabel ? `Login to ${settings.proxyLabel}` : "Login to Library"}
+          </a>
+          <button
+            onClick={() => setProxyVerified(true)}
+            style={{
+              background: "none",
+              border: "none",
+              color: "var(--dim)",
+              cursor: "pointer",
+              marginLeft: "10px",
+            }}
+          >
+            ✕
+          </button>
+        </div>
+      )}
+
       <header className="hdr">
         <h1>SpinStack</h1>
         <span className="readout">
@@ -1984,6 +2113,26 @@ export default function App() {
         <button onClick={() => loadFeed(true)} title="Refresh feed" aria-label="Refresh feed">
           <RefreshCw size={16} color={loadingFeed ? "var(--teal)" : "var(--dim)"} className={loadingFeed ? "spin" : ""} />
         </button>
+        {settings.libraryProxy && (
+          <a
+            href={settings.libraryProxy + encodeURIComponent("https://scholar.google.com")}
+            target="_blank"
+            rel="noopener noreferrer"
+            style={{
+              fontSize: "10px",
+              fontFamily: "var(--mono)",
+              color: "var(--teal)",
+              border: "1px solid var(--teal-border)",
+              borderRadius: "4px",
+              padding: "2px 5px",
+              textDecoration: "none",
+              marginRight: "4px",
+            }}
+            title="Connect/Verify library proxy"
+          >
+            {settings.proxyLabel ? settings.proxyLabel.toUpperCase() : "PROXY"}
+          </a>
+        )}
         <span className={`sync-dot ${syncStatus}`} title={`Sync: ${syncStatus}`} />
       </header>
 
@@ -2065,16 +2214,6 @@ export default function App() {
               </div>
             )}
           </span>
-          <span className="spacer" />
-          {settings.uiMode !== "swipe" && (
-            <button
-              className={`chip${sortMode !== "relevance" ? " on" : ""}`}
-              onClick={() => setFilterSheet(true)}
-              aria-label="Sort"
-            >
-              ⇅ {SORT_LABELS[sortMode] || "RELEVANCE"} ▾
-            </button>
-          )}
         </div>
       )}
 
