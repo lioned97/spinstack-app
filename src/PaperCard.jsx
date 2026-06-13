@@ -85,6 +85,10 @@ export default function PaperCard({
   const isVideo = p.mediaType === "video";
   const isArticle = p.mediaType === "article";
   const isWebMedia = isVideo || isArticle;
+  const primarySource =
+    cat === "science" && (p.mediaType === "journal" || p.mediaType === "article")
+      ? p.venue || p.source || "publication"
+      : p.source || p.venue || "paper";
 
   // figure extraction (once per device): eagerly for the top of the feed
   // and the deck card so closed cards show figures too, lazily on "More"
@@ -101,11 +105,11 @@ export default function PaperCard({
       <div className="eyebrow">
         <span className="src">
           {cat === "science"
-            ? p.source || p.venue || "paper"
+            ? primarySource
             : `${cat} · ${p.source || p.venue || ""}`}
         </span>
         <span>{p.year}</span>
-        {cat === "science" && p.venue && String(p.venue).toLowerCase() !== String(p.source || "").toLowerCase() && (
+        {cat === "science" && p.venue && String(p.venue).toLowerCase() !== String(primarySource).toLowerCase() && (
           <span>· {String(p.venue).slice(0, 36)}</span>
         )}
         {isNew && <span className="new-flag">NEW</span>}

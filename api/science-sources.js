@@ -7,30 +7,14 @@
 import { complete } from "./_llm.js";
 
 const SOURCES = [
-  // Broad, high-impact journals.
-  { url: "https://www.nature.com/nature.rss", venue: "Nature", type: "journal" },
-  { url: "https://www.science.org/action/showFeed?type=etoc&feed=rss&jc=science", venue: "Science", type: "journal" },
-  { url: "https://www.science.org/action/showFeed?type=etoc&feed=rss&jc=sciadv", venue: "Science Advances", type: "journal" },
-  { url: "https://www.pnas.org/action/showFeed?type=etoc&feed=rss&jc=pnas", venue: "PNAS", type: "journal" },
-
-  // Strong matches for NV-center, quantum-sensing, and condensed-matter work.
-  { url: "https://www.nature.com/nphys.rss", venue: "Nature Physics", type: "journal" },
-  { url: "https://www.nature.com/ncomms.rss", venue: "Nature Communications", type: "journal" },
-  { url: "https://www.nature.com/natrevphys.rss", venue: "Nature Reviews Physics", type: "journal" },
-  { url: "https://www.nature.com/nnano.rss", venue: "Nature Nanotechnology", type: "journal" },
-  { url: "https://www.nature.com/nmat.rss", venue: "Nature Materials", type: "journal" },
-  { url: "https://www.nature.com/nphoton.rss", venue: "Nature Photonics", type: "journal" },
-  { url: "https://quantum-journal.org/feed/", venue: "Quantum", type: "journal" },
-  { url: "https://feeds.aps.org/rss/recent/prl.xml", venue: "Physical Review Letters", type: "journal" },
-  { url: "https://feeds.aps.org/rss/recent/prxquantum.xml", venue: "PRX Quantum", type: "journal" },
-  { url: "https://feeds.aps.org/rss/recent/prresearch.xml", venue: "Physical Review Research", type: "journal" },
-  { url: "https://feeds.aps.org/rss/recent/prapplied.xml", venue: "Physical Review Applied", type: "journal" },
-  { url: "https://iopscience.iop.org/journal/rss/1367-2630", venue: "New Journal of Physics", type: "journal" },
-
-  // Research news and explainers.
-  { url: "https://thequantuminsider.com/feed/", venue: "The Quantum Insider", type: "article" },
-  { url: "https://physicsworld.com/feed/", venue: "Physics World", type: "article" },
-  { url: "https://www.quantamagazine.org/feed/", venue: "Quanta Magazine", type: "article" },
+  { id: "nature", url: "https://www.nature.com/nature.rss", venue: "Nature", type: "journal" },
+  { id: "science", url: "https://www.science.org/action/showFeed?type=etoc&feed=rss&jc=science", venue: "Science", type: "journal" },
+  { id: "pnas", url: "https://www.pnas.org/action/showFeed?type=etoc&feed=rss&jc=pnas", venue: "PNAS", type: "journal" },
+  { id: "nature-physics", url: "https://www.nature.com/nphys.rss", venue: "Nature Physics", type: "journal" },
+  { id: "prl", url: "https://feeds.aps.org/rss/recent/prl.xml", venue: "Physical Review Letters", type: "journal" },
+  { id: "quantum-insider", url: "https://thequantuminsider.com/feed/", venue: "The Quantum Insider", type: "article" },
+  { id: "physics-world", url: "https://physicsworld.com/feed/", venue: "Physics World", type: "article" },
+  { id: "quanta", url: "https://www.quantamagazine.org/feed/", venue: "Quanta Magazine", type: "article" },
 ];
 
 const UA = { "User-Agent": "SpinStack/3.0 (personal research tool)" };
@@ -138,6 +122,7 @@ function parseFeed(xml, source) {
         doi,
         image: imageFrom(body) || null,
         mediaType: source.type,
+        sourceId: source.id,
       });
     }
   }
@@ -199,15 +184,19 @@ function keywordRelevant(item, topics) {
 export default async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).json({ error: "POST only" });
 
-  const { topics, provider } = req.body || {};
+  const { topics, provider, sources } = req.body || {};
   const topicList = (Array.isArray(topics) ? topics : [])
     .map((topic) => String(topic).trim())
     .filter(Boolean)
     .slice(0, 24);
+  const requestedSources = Array.isArray(sources) ? new Set(sources.map(String)) : null;
+  const activeSources = requestedSources
+    ? SOURCES.filter((source) => requestedSources.has(source.id))
+    : SOURCES;
 
   try {
     const settled = await Promise.allSettled(
-      SOURCES.map(async (source) => parseFeed(await fetchText(source.url), source))
+      activeSources.map(async (source) => parseFeed(await fetchText(source.url), source))
     );
     const byId = new Map();
     for (const result of settled) {

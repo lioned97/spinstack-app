@@ -76,6 +76,19 @@ const CATEGORY_ANCHORS = {
 
 const THEME_COLORS = { dark: "#121316", light: "#faf9fa" };
 
+const SCIENCE_PUBLICATIONS = [
+  { id: "nature", label: "Nature", kind: "journal" },
+  { id: "science", label: "Science", kind: "journal" },
+  { id: "pnas", label: "PNAS", kind: "journal" },
+  { id: "nature-physics", label: "Nature Physics", kind: "journal" },
+  { id: "prl", label: "Physical Review Letters", kind: "journal" },
+  { id: "quantum-insider", label: "The Quantum Insider", kind: "article" },
+  { id: "physics-world", label: "Physics World", kind: "article" },
+  { id: "quanta", label: "Quanta Magazine", kind: "article" },
+];
+const ALL_SCIENCE_PUBLICATION_IDS = SCIENCE_PUBLICATIONS.map((source) => source.id);
+const SCIENCE_PUBLICATION_ID_SET = new Set(ALL_SCIENCE_PUBLICATION_IDS);
+
 const SOURCE_LABELS = {
   arxiv: "arXiv",
   "semantic-scholar": "Semantic Scholar",
@@ -85,6 +98,14 @@ const SOURCE_LABELS = {
   pubmed: "PubMed",
   journal: "Journal feeds",
   "science-news": "Science articles",
+  nature: "Nature",
+  science: "Science",
+  pnas: "PNAS",
+  "nature-physics": "Nature Physics",
+  prl: "Physical Review Letters",
+  "quantum-insider": "The Quantum Insider",
+  "physics-world": "Physics World",
+  quanta: "Quanta Magazine",
   wikivoyage: "Wikivoyage",
   wikipedia: "Wikipedia",
   youtube: "YouTube",
@@ -301,12 +322,12 @@ async function fetchTravelTopic(topicName) {
   return settled.flatMap((result) => (result.status === "fulfilled" ? result.value : []));
 }
 
-async function fetchCuratedScience(topicNames, provider) {
-  if (!topicNames.length) return [];
+async function fetchCuratedScience(topicNames, provider, sources) {
+  if (!topicNames.length || !sources.length) return [];
   const res = await fetch("/api/science-sources", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ topics: topicNames, provider }),
+    body: JSON.stringify({ topics: topicNames, provider, sources }),
   });
   if (!res.ok) return [];
   const data = await res.json();
@@ -323,7 +344,7 @@ async function fetchCuratedScience(topicNames, provider) {
       url: item.url,
       doi: item.doi || undefined,
       images: item.image ? [item.image] : [],
-      source: item.mediaType === "article" ? "science-news" : "journal",
+      source: item.sourceId || (item.mediaType === "article" ? "science-news" : "journal"),
       mediaType: item.mediaType || "journal",
       category: "science",
       harvestedAt: nowISO(),
@@ -508,6 +529,11 @@ export default function App() {
       updatedAt: nowISO(),
     })
   );
+  const selectedScienceSources = (
+    Array.isArray(settings.scienceSources)
+      ? settings.scienceSources
+      : ALL_SCIENCE_PUBLICATION_IDS
+  ).filter((id) => SCIENCE_PUBLICATION_ID_SET.has(id));
   const [lastSeen, setLastSeen] = useState(() => sGet("ss2_last_seen", ""));
 
   const [tab, setTab] = useState("stack");
@@ -560,6 +586,13 @@ export default function App() {
     const ns = { ...settings, ...patch, updatedAt: nowISO() };
     setSettings(ns);
     persist("ss2_settings", ns);
+  }
+
+  function toggleSciencePublication(id) {
+    const next = selectedScienceSources.includes(id)
+      ? selectedScienceSources.filter((sourceId) => sourceId !== id)
+      : [...selectedScienceSources, id];
+    updateSettings({ scienceSources: next });
   }
 
   // ── theme: auto / dark / light ──
@@ -680,7 +713,7 @@ export default function App() {
         .filter((topic) => catOf(topic) === "science")
         .map(topicQuery);
       try {
-        fresh.push(...(await fetchCuratedScience(scienceTopics, aiProvider)));
+        fresh.push(...(await fetchCuratedScience(scienceTopics, aiProvider, selectedScienceSources)));
       } catch {}
       // re-fetch the harvest feed too
       try {
@@ -947,7 +980,7 @@ export default function App() {
           }
           if (isSci) {
             try {
-              found.push(...(await fetchCuratedScience(searchQueries, aiProvider)));
+              found.push(...(await fetchCuratedScience(searchQueries, aiProvider, selectedScienceSources)));
             } catch {}
           }
           return found;
@@ -1115,7 +1148,7 @@ export default function App() {
           await new Promise((r) => setTimeout(r, 350)); // S2 courtesy gap
         }
         try {
-          fresh.push(...(await fetchCuratedScience(queries, aiProvider)));
+          fresh.push(...(await fetchCuratedScience(queries, aiProvider, selectedScienceSources)));
         } catch {}
         if (aiCat) {
           // remember the AI-picked category on the topic — the harvester
@@ -2281,11 +2314,49 @@ export default function App() {
             <p className="hint">Daily harvest output (papers/latest.json on GitHub).</p>
           </div>
           <div className="field">
-            <label>Built-in science sources</label>
+            <label>Science publications</label>
+            <div className="source-list">
+              {[
+                ["journal", "Top journals"],
+                ["article", "Research articles"],
+              ].map(([kind, heading]) => (
+                <div key={kind} className="source-group">
+                  <div className="source-group-title">{heading}</div>
+                  {SCIENCE_PUBLICATIONS.filter((source) => source.kind === kind).map((source) => (
+                    <label className="source-choice" key={source.id}>
+                      <input
+                        type="checkbox"
+                        checked={selectedScienceSources.includes(source.id)}
+                        onChange={() => toggleSciencePublication(source.id)}
+                      />
+                      <span>{source.label}</span>
+                    </label>
+                  ))}
+                </div>
+              ))}
+            </div>
+            <div className="source-list-actions">
+              <button
+                className="btn ghost"
+                type="button"
+                onClick={() => updateSettings({ scienceSources: ALL_SCIENCE_PUBLICATION_IDS })}
+              >
+                Mark all
+              </button>
+              <button
+                className="btn ghost"
+                type="button"
+                onClick={() => updateSettings({ scienceSources: [] })}
+              >
+                Unmark all
+              </button>
+              <span className="readout">
+                {selectedScienceSources.length}/{SCIENCE_PUBLICATIONS.length} active
+              </span>
+            </div>
             <p className="hint">
-              Every regular science search also checks Nature, Science, PNAS, leading Nature and
-              APS physics journals, plus articles from The Quantum Insider, Physics World, Quanta
-              Magazine.
+              Used by regular live search and the next daily harvest. The five-journal set is
+              Nature, Science, PNAS, Nature Physics, and Physical Review Letters.
             </p>
           </div>
           <div className="field">

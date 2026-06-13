@@ -275,6 +275,32 @@ a:hover { text-decoration: underline; }
   display: block; font-family: var(--mono); font-size: 10.5px; color: var(--dim);
   text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 6px;
 }
+.source-list {
+  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px; margin-top: 8px;
+}
+.source-group {
+  border: 1px solid var(--line); border-radius: 10px;
+  background: var(--panel); padding: 10px;
+}
+.source-group-title {
+  font-family: var(--mono); font-size: 10px; font-weight: 700;
+  color: var(--gold); letter-spacing: 0.12em; text-transform: uppercase;
+  margin-bottom: 7px;
+}
+.field label.source-choice {
+  display: flex; align-items: center; gap: 8px;
+  margin: 0; padding: 6px 2px; cursor: pointer;
+  color: var(--ink); font-family: var(--sans); font-size: 13px;
+  letter-spacing: 0; text-transform: none;
+}
+.source-choice input { accent-color: var(--teal); }
+.source-list-actions {
+  display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 9px;
+}
+@media (max-width: 540px) {
+  .source-list { grid-template-columns: 1fr; }
+}
 .hint { font-size: 12px; color: var(--dim); margin-top: 6px; line-height: 1.5; }
 
 .empty {
